@@ -25,6 +25,10 @@ export class FakeSheet {
     return this.rows.length
   }
 
+  getLastColumn() {
+    return this.rows.reduce((max, row) => Math.max(max, row.length), 0)
+  }
+
   setFrozenRows(n) {
     this.frozenRows = n
   }
@@ -41,6 +45,9 @@ export class FakeSheet {
           out.push(line)
         }
         return out
+      },
+      getDisplayValues() {
+        return range.getValues().map((line) => line.map((v) => String(v)))
       },
       setValues(values) {
         if (values.length !== numRows || values.some((v) => v.length !== numCols)) {
@@ -141,8 +148,8 @@ export function createAppsScriptEnv({ properties = {}, spreadsheets = {}, active
     return { mimeType: output.mimeType, body: JSON.parse(output.content) }
   }
 
-  function get() {
-    const output = context.doGet({})
+  function get(parameter = {}) {
+    const output = context.doGet({ parameter })
     return { mimeType: output.mimeType, body: JSON.parse(output.content) }
   }
 

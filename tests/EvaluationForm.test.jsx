@@ -147,7 +147,7 @@ describe('EvaluationForm', () => {
     const user = userEvent.setup()
     const pending = deferred()
     const submit = vi.fn(() => pending.promise)
-    render(<EvaluationForm submit={submit} />)
+    render(<EvaluationForm taskCode="FBADS001" submit={submit} />)
     await fillForm(user)
 
     await user.click(submitButton())
@@ -176,6 +176,7 @@ describe('EvaluationForm', () => {
       failureTags: ['N/A'],
       likertScore: 4,
       stateChangeValidated: 'Yes',
+      taskCode: 'FBADS001',
     })
     expect(payload.submissionId).toMatch(/^[0-9a-f-]{36}$/)
     expect(payload.dateOfTest).toMatch(/^\d{4}-\d{2}-\d{2}$/)

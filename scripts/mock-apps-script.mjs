@@ -4,6 +4,7 @@
 // (Access-Control-Allow-Origin: *, no preflight support).
 //
 //   npm run mock:backend            # http://localhost:8787/exec
+//   GET  /exec?action=task&code=FBADS001   # task for a code (also SHOPIFY2)
 //   GET  /rows                      # inspect stored rows as JSON
 //   GET  /mode?fail=1&delay=3000    # simulate server errors / slow responses
 //   GET  /mode                      # back to normal behaviour
@@ -14,6 +15,26 @@ import { createAppsScriptEnv, FakeSpreadsheet } from '../tests/helpers/appsScrip
 const PORT = Number(process.env.PORT || 8787)
 const spreadsheet = new FakeSpreadsheet('local-mock')
 const mode = { fail: false, delay: 0 }
+spreadsheet.insertSheet('Tasks').rows.push(
+  ['Code', 'Title', 'Task'],
+  [
+    'FBADS001',
+    'Facebook Ads performance review',
+    [
+      'Connector: Facebook Ads',
+      'Surface: Web app',
+      'Platform to be used: Claude Cowork',
+      'Hero Use Case: Find the worst-performing ad set and pause it',
+      'Power-User- Workflow: Compare CPA across all active ad sets for the last 7 days',
+      'Why High Value: Stops wasted spend without manual analysis',
+      'Key Actions Exercised: Read ad set insights, update ad set status',
+      'State Changing: Yes',
+      'Setup Difficulty: Medium',
+      'Payments/ Real Interactions: Real ad spend is affected',
+    ].join('\n'),
+  ],
+  ['SHOPIFY2', 'Shopify inventory restock', 'Connector: Shopify\nHero Use Case: Restock the three lowest-stock products'],
+)
 const env = createAppsScriptEnv({
   properties: { SPREADSHEET_ID: 'local-mock', SHEET_NAME: 'Evaluations' },
   spreadsheets: { 'local-mock': spreadsheet },
@@ -46,7 +67,7 @@ createServer((req, res) => {
   }
 
   if (url.pathname !== '/exec') return send(res, 404, 'Not found', 'text/plain')
-  if (req.method === 'GET') return send(res, 200, env.get().body)
+  if (req.method === 'GET') return send(res, 200, env.get(Object.fromEntries(url.searchParams)).body)
   if (req.method !== 'POST') return send(res, 405, 'Method not allowed', 'text/plain')
 
   let raw = ''
@@ -63,4 +84,5 @@ createServer((req, res) => {
   })
 }).listen(PORT, () => {
   console.log(`Mock Apps Script listening on http://localhost:${PORT}/exec (rows at /rows)`)
+  console.log('Sample task codes: FBADS001, SHOPIFY2')
 })

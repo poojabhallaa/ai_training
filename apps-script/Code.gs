@@ -2,12 +2,16 @@
  * Candidate Evaluation backend: Google Apps Script web app.
  *
  * Accepts evaluation submissions as JSON (sent as text/plain to avoid a CORS
- * preflight) and appends each one as a row in a Google Sheet.
+ * preflight) and appends each one as a row in a Google Sheet. Also serves the
+ * task shown at the top of the form, read from the "Tasks" tab of the same
+ * spreadsheet. Each task has its own access code, and the task is only
+ * returned for a matching code (GET ?action=task&code=...).
  *
- * Configuration lives in Script Properties (Project Settings > Script Properties):
- *   SPREADSHEET_ID   ID of the target spreadsheet. Optional if this script is
- *                    bound to the spreadsheet (Extensions > Apps Script).
- *   SHEET_NAME       Worksheet (tab) name. Defaults to "Evaluations".
+ * The defaults below can be overridden in Script Properties
+ * (Project Settings > Script Properties):
+ *   SPREADSHEET_ID   1GCcvSXo3hH6yuxsi9bVnJitYukiLi2GZO5FYUKXLlBo
+ *   SHEET_NAME       Worksheet (tab) that receives the responses.
+ *   TASK_SHEET_NAME  Worksheet (tab) that holds the tasks and their codes.
  *   ALLOWED_ORIGINS  Optional comma-separated list of site origins, e.g.
  *                    "https://example.github.io,http://localhost:5173".
  *                    Apps Script cannot read the real Origin header, so this
@@ -18,13 +22,18 @@
  * whether the row was saved.
  */
 
-var DEFAULT_SHEET_NAME = 'Evaluations';
+var DEFAULT_SPREADSHEET_ID = '1GCcvSXo3hH6yuxsi9bVnJitYukiLi2GZO5FYUKXLlBo';
+var DEFAULT_SHEET_NAME = 'AI training responses';
+var DEFAULT_TASK_SHEET_NAME = 'Tasks';
+// Single-task tab used before task codes existed. setupSheet copies its task
+// into the Tasks tab.
+var LEGACY_TASK_SHEET_NAME = 'Task';
 var MAX_TEXT_LENGTH = 50000;
 var MAX_SHORT_TEXT_LENGTH = 200;
 var LOCK_TIMEOUT_MS = 20000;
 
 var TASK_SUCCESS = ['Pass', 'Partial', 'Fail'];
-var WHICH_IS_BETTER = ['ChatGPT', 'Claude', 'Tie', 'N/A'];
+var WHICH_IS_BETTER = ['ChatGPT', 'Claude', 'N/A'];
 var STATE_CHANGE_VALIDATED = ['Yes', 'No', 'N/A'];
 
 // [payload key, column header]. Order defines the spreadsheet columns.
@@ -46,6 +55,10 @@ var COLUMNS = [
   ['stateChangeValidated', 'State Change Validated'],
   ['actualResult', 'Actual Result'],
   ['additionalNotes', 'Additional Notes'],
+  // Added with task codes. New columns go at the end so existing rows keep
+  // their positions; ensureHeader_ fills in their headers on older sheets.
+  ['taskCode', 'Task Code'],
+  ['taskTitle', 'Task Title'],
 ];
 
 function doPost(e) {
@@ -54,31 +67,69 @@ function doPost(e) {
     var config = getConfig_();
     checkOrigin_(config, body.origin);
     var record = validateSubmission_(body);
+    var task = findTask_(getSpreadsheet_(config), config, record.taskCode);
+    if (!task) {
+      throw new ApiError_(
+        'INVALID_CODE',
+        'The task code is no longer valid, so the evaluation could not be saved. Ask the person who gave you the code.'
+      );
+    }
+    record.taskCode = task.code;
+    record.taskTitle = task.title;
     return jsonResponse_(saveRecord_(config, record));
   } catch (err) {
     return jsonResponse_(errorBody_(err));
   }
 }
 
-/** Health check: open the web app URL in a browser to confirm it is deployed. */
-function doGet() {
+/**
+ * GET ?action=task&code=... returns the task with that code. Without a
+ * matching code nothing about any task is returned.
+ * GET with no action is a health check: open the web app URL in a browser to
+ * confirm it is deployed.
+ */
+function doGet(e) {
+  var params = (e && e.parameter) || {};
+  var action = params.action || '';
   try {
     var config = getConfig_();
+    if (action === 'task') {
+      var task = findTask_(getSpreadsheet_(config), config, params.code);
+      if (!task) throw new ApiError_('INVALID_CODE', 'That code does not match any task. Check it and try again.');
+      return jsonResponse_({ ok: true, task: task });
+    }
     var sheet = getSheet_(config);
     return jsonResponse_({ ok: true, service: 'candidate-evaluation', sheet: sheet.getName() });
   } catch (err) {
-    return jsonResponse_(errorBody_(err));
+    return jsonResponse_(errorBody_(err, action === 'task' ? 'The task could not be loaded.' : undefined));
   }
 }
 
 /**
  * Run once from the Apps Script editor (select "setupSheet" and click Run).
- * Grants spreadsheet permissions and writes the header row.
+ * Grants spreadsheet permissions, writes the response header row, and creates
+ * the Tasks tab if it does not exist yet. The first task is copied from the
+ * old single-task "Task" tab when there is one, otherwise it is a placeholder.
  */
 function setupSheet() {
-  var sheet = getSheet_(getConfig_());
+  var config = getConfig_();
+  var sheet = getSheet_(config);
   ensureHeader_(sheet);
-  Logger.log('Sheet "' + sheet.getName() + '" is ready.');
+  var taskSheet = ensureTaskSheet_(getSpreadsheet_(config), config);
+  Logger.log('Sheets "' + sheet.getName() + '" and "' + taskSheet.getName() + '" are ready.');
+  logCodeChanges_(fillMissingCodes_(taskSheet, config));
+}
+
+/**
+ * Run from the Apps Script editor after adding tasks to the Tasks tab. Every
+ * task row with an empty Code cell gets a new random code that no other task
+ * uses. Existing codes are never changed.
+ */
+function generateTaskCodes() {
+  var config = getConfig_();
+  var sheet = getSpreadsheet_(config).getSheetByName(config.taskSheetName);
+  if (!sheet) throw new Error('There is no "' + config.taskSheetName + '" tab. Run setupSheet first.');
+  logCodeChanges_(fillMissingCodes_(sheet, config));
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +140,7 @@ function ApiError_(code, message, fields) {
   this.fields = fields || null;
 }
 
-function errorBody_(err) {
+function errorBody_(err, fallbackMessage) {
   if (err instanceof ApiError_) {
     var error = { code: err.code, message: err.message };
     if (err.fields) error.fields = err.fields;
@@ -98,7 +149,7 @@ function errorBody_(err) {
   console.error(err && err.stack ? err.stack : err);
   return {
     ok: false,
-    error: { code: 'SERVER_ERROR', message: 'The server could not save the evaluation. Try again.' },
+    error: { code: 'SERVER_ERROR', message: fallbackMessage || 'The server could not save the evaluation. Try again.' },
   };
 }
 
@@ -113,13 +164,14 @@ function getConfig_() {
     .map(function (s) { return s.trim().replace(/\/+$/, ''); })
     .filter(function (s) { return s; });
   return {
-    spreadsheetId: (props.getProperty('SPREADSHEET_ID') || '').trim(),
+    spreadsheetId: (props.getProperty('SPREADSHEET_ID') || '').trim() || DEFAULT_SPREADSHEET_ID,
     sheetName: (props.getProperty('SHEET_NAME') || '').trim() || DEFAULT_SHEET_NAME,
+    taskSheetName: (props.getProperty('TASK_SHEET_NAME') || '').trim() || DEFAULT_TASK_SHEET_NAME,
     allowedOrigins: origins,
   };
 }
 
-function getSheet_(config) {
+function getSpreadsheet_(config) {
   var spreadsheet;
   if (config.spreadsheetId) {
     try {
@@ -134,7 +186,154 @@ function getSheet_(config) {
       throw new ApiError_('CONFIG_ERROR', 'No spreadsheet is configured. Set the SPREADSHEET_ID script property.');
     }
   }
+  return spreadsheet;
+}
+
+function getSheet_(config) {
+  var spreadsheet = getSpreadsheet_(config);
   return spreadsheet.getSheetByName(config.sheetName) || spreadsheet.insertSheet(config.sheetName);
+}
+
+// The Tasks tab has a header row with "Code", "Title" and "Task" columns (in
+// any order; other columns are ignored) and one task per row below it. A row
+// with an empty Code cell is never shown to anyone.
+var TASK_HEADERS = { code: 'Code', title: 'Title', text: 'Task' };
+// No 0/O, 1/I/L, so codes are easy to read out and type.
+var CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+var CODE_LENGTH = 8;
+
+/** Codes match regardless of case, spaces and dashes: "ab3d-7kq9" is "AB3D7KQ9". */
+function normalizeCode_(value) {
+  return String(value == null ? '' : value).toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function ensureTaskSheet_(spreadsheet, config) {
+  var sheet = spreadsheet.getSheetByName(config.taskSheetName);
+  if (sheet) return sheet;
+  var first = readLegacyTask_(spreadsheet, config) || {
+    title: 'Task title',
+    text: 'Replace this text with the task the candidate should perform.',
+  };
+  sheet = spreadsheet.insertSheet(config.taskSheetName);
+  sheet.getRange(1, 1, 2, 3).setValues([
+    [TASK_HEADERS.code, TASK_HEADERS.title, TASK_HEADERS.text],
+    ['', toCellValue_(first.title), toCellValue_(first.text)],
+  ]);
+  sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  return sheet;
+}
+
+/** Returns { title, text } from the old two-column "Task" tab, or null. */
+function readLegacyTask_(spreadsheet, config) {
+  if (config.taskSheetName === LEGACY_TASK_SHEET_NAME) return null;
+  var sheet = spreadsheet.getSheetByName(LEGACY_TASK_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() === 0) return null;
+  var rows = sheet.getRange(1, 1, sheet.getLastRow(), 2).getDisplayValues();
+  var task = { title: '', text: '' };
+  for (var i = 0; i < rows.length; i++) {
+    var key = String(rows[i][0]).trim().toLowerCase();
+    if (key === 'title') task.title = String(rows[i][1]).trim();
+    else if (key === 'task') task.text = String(rows[i][1]).trim();
+  }
+  return task.title || task.text ? task : null;
+}
+
+/** Column indexes (0-based) of the task headers in row 1; title is -1 if absent. */
+function taskColumns_(headerRow, config) {
+  function find(name) {
+    for (var c = 0; c < headerRow.length; c++) {
+      if (String(headerRow[c]).trim().toLowerCase() === name.toLowerCase()) return c;
+    }
+    return -1;
+  }
+  var cols = { code: find(TASK_HEADERS.code), title: find(TASK_HEADERS.title), text: find(TASK_HEADERS.text) };
+  if (cols.code === -1 || cols.text === -1) {
+    throw new ApiError_(
+      'CONFIG_ERROR',
+      'Row 1 of the "' + config.taskSheetName + '" tab must have "Code" and "Task" column headers.'
+    );
+  }
+  return cols;
+}
+
+/** Reads the Tasks tab as { cols, rows } with display values, or null if it is missing or empty. */
+function readTaskTable_(sheet, config) {
+  if (!sheet || sheet.getLastRow() === 0) return null;
+  // Display values return exactly what the cell shows, so dates and numbers
+  // in the task text are not reformatted.
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getDisplayValues();
+  return { cols: taskColumns_(values[0], config), rows: values.slice(1) };
+}
+
+/**
+ * Returns { code, title, text } for the task whose code matches, or null.
+ * A code shared by several rows matches none of them, so a copy-paste mistake
+ * in the sheet never shows one candidate the wrong task.
+ */
+function findTask_(spreadsheet, config, code) {
+  var wanted = normalizeCode_(code);
+  if (!wanted) return null;
+  var table = readTaskTable_(spreadsheet.getSheetByName(config.taskSheetName), config);
+  if (!table) return null;
+  var cols = table.cols;
+  var matches = table.rows.filter(function (row) { return normalizeCode_(row[cols.code]) === wanted; });
+  if (matches.length > 1) {
+    throw new ApiError_('CONFIG_ERROR', 'This code is assigned to more than one task. Ask the person who gave it to you.');
+  }
+  if (matches.length === 0) return null;
+  return {
+    code: wanted,
+    title: cols.title === -1 ? '' : String(matches[0][cols.title]).trim(),
+    text: String(matches[0][cols.text]).trim(),
+  };
+}
+
+function newCode_(used) {
+  var code;
+  do {
+    code = '';
+    for (var i = 0; i < CODE_LENGTH; i++) {
+      code += CODE_ALPHABET.charAt(Math.floor(Math.random() * CODE_ALPHABET.length));
+    }
+  } while (used[code]);
+  used[code] = true;
+  return code;
+}
+
+/**
+ * Gives every task row that has a title or task text but no code a new unique
+ * code. Returns { added: [{ row, code }], duplicates: [code] }.
+ */
+function fillMissingCodes_(sheet, config) {
+  var result = { added: [], duplicates: [] };
+  var table = readTaskTable_(sheet, config);
+  if (!table) return result;
+  var cols = table.cols;
+  var used = {};
+  table.rows.forEach(function (row) {
+    var code = normalizeCode_(row[cols.code]);
+    if (!code) return;
+    if (used[code] && result.duplicates.indexOf(code) === -1) result.duplicates.push(code);
+    used[code] = true;
+  });
+  table.rows.forEach(function (row, i) {
+    var hasTask = String(row[cols.text]).trim() || (cols.title !== -1 && String(row[cols.title]).trim());
+    if (normalizeCode_(row[cols.code]) || !hasTask) return;
+    var code = newCode_(used);
+    // Written as literal text so a code such as "23E45678" is not read as a number.
+    sheet.getRange(i + 2, cols.code + 1).setValues([[toCellValue_(code)]]);
+    result.added.push({ row: i + 2, code: code });
+  });
+  return result;
+}
+
+function logCodeChanges_(result) {
+  result.added.forEach(function (a) { Logger.log('Row ' + a.row + ': new code ' + a.code); });
+  if (result.added.length === 0) Logger.log('Every task already has a code.');
+  result.duplicates.forEach(function (code) {
+    Logger.log('Warning: code ' + code + ' is used by more than one row. Nobody can open those tasks until each has its own code.');
+  });
 }
 
 function ensureHeader_(sheet) {
@@ -146,12 +345,17 @@ function ensureHeader_(sheet) {
   }
   var existing = sheet.getRange(1, 1, 1, headers.length).getValues()[0];
   for (var i = 0; i < headers.length; i++) {
-    if (String(existing[i]).trim() !== headers[i]) {
-      throw new ApiError_(
-        'CONFIG_ERROR',
-        'The worksheet header row does not match the expected columns (column ' + (i + 1) + ' should be "' + headers[i] + '").'
-      );
+    var cell = String(existing[i]).trim();
+    if (cell === headers[i]) continue;
+    // Columns added in a later version: write their headers after the existing ones.
+    if (existing.slice(i).every(function (v) { return String(v).trim() === ''; })) {
+      sheet.getRange(1, i + 1, 1, headers.length - i).setValues([headers.slice(i)]).setFontWeight('bold');
+      return;
     }
+    throw new ApiError_(
+      'CONFIG_ERROR',
+      'The worksheet header row does not match the expected columns (column ' + (i + 1) + ' should be "' + headers[i] + '").'
+    );
   }
 }
 
@@ -205,6 +409,13 @@ function validateSubmission_(body) {
     errors.submissionId = 'Submission ID is missing or invalid.';
   } else {
     record.submissionId = body.submissionId;
+  }
+
+  var taskCode = body.taskCode;
+  if (typeof taskCode !== 'string' || taskCode.length > MAX_SHORT_TEXT_LENGTH || !normalizeCode_(taskCode)) {
+    errors.taskCode = 'Task code is missing. Reload the page and enter your task code.';
+  } else {
+    record.taskCode = taskCode;
   }
 
   if (typeof body.dateOfTest !== 'string' || !isValidDate_(body.dateOfTest)) {

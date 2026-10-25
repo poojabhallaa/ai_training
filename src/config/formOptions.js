@@ -47,7 +47,7 @@ export const FAILURE_TAGS = [
 // Keep both in sync if you change them.
 export const TASK_SUCCESS = ['Pass', 'Partial', 'Fail']
 
-export const WHICH_IS_BETTER = ['ChatGPT', 'Claude', 'Tie', 'N/A']
+export const WHICH_IS_BETTER = ['ChatGPT', 'Claude', 'N/A']
 
 export const STATE_CHANGE_VALIDATED = ['Yes', 'No', 'N/A']
 

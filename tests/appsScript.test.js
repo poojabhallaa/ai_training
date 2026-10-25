@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { createAppsScriptEnv, FakeSpreadsheet } from './helpers/appsScriptHarness.js'
 import { validPayload } from './helpers/fixtures.js'
 
+const DEFAULT_SPREADSHEET_ID = '1GCcvSXo3hH6yuxsi9bVnJitYukiLi2GZO5FYUKXLlBo'
+
 const HEADERS = [
   'Submission ID',
   'Submission Timestamp',
@@ -21,10 +23,19 @@ const HEADERS = [
   'State Change Validated',
   'Actual Result',
   'Additional Notes',
+  'Task Code',
+  'Task Title',
 ]
+
+function addTasksTab(spreadsheet, rows = [['FBADS001', 'Facebook Ads review', 'Pause the worst ad set.']]) {
+  const tab = spreadsheet.insertSheet('Tasks')
+  tab.rows.push(['Code', 'Title', 'Task'], ...rows)
+  return tab
+}
 
 function setup(properties = {}) {
   const spreadsheet = new FakeSpreadsheet('sheet-123')
+  addTasksTab(spreadsheet)
   const env = createAppsScriptEnv({
     properties: { SPREADSHEET_ID: 'sheet-123', SHEET_NAME: 'Evaluations', ...properties },
     spreadsheets: { 'sheet-123': spreadsheet },
@@ -66,6 +77,8 @@ describe('Apps Script doPost', () => {
       'Yes',
       p.actualResult,
       'Clean run.',
+      'FBADS001',
+      'Facebook Ads review',
     ])
   })
 
@@ -180,11 +193,17 @@ describe('Apps Script doPost', () => {
     })
   })
 
-  it('uses the bound spreadsheet when SPREADSHEET_ID is not set', () => {
-    const active = new FakeSpreadsheet('bound')
-    const env = createAppsScriptEnv({ activeSpreadsheet: active })
+  it('uses the default spreadsheet ID and tab name when no properties are set', () => {
+    const spreadsheet = new FakeSpreadsheet(DEFAULT_SPREADSHEET_ID)
+    addTasksTab(spreadsheet)
+    const env = createAppsScriptEnv({ spreadsheets: { [DEFAULT_SPREADSHEET_ID]: spreadsheet } })
     expect(env.post(validPayload()).body.ok).toBe(true)
-    expect(active.getSheetByName('Evaluations').rows).toHaveLength(2)
+    expect(spreadsheet.getSheetByName('AI training responses').rows).toHaveLength(2)
+  })
+
+  it('rejects "Tie" for Which Is Better', () => {
+    const { env } = setup()
+    expect(env.post(validPayload({ whichIsBetter: 'Tie' })).body.error.fields).toHaveProperty('whichIsBetter')
   })
 
   it('writes to the configured worksheet name', () => {
@@ -219,6 +238,40 @@ describe('Apps Script doPost', () => {
     expect(sheet()).toBeNull()
   })
 
+  it('requires a task code', () => {
+    const { env, sheet } = setup()
+    for (const taskCode of [undefined, '', ' - ', 42]) {
+      const res = env.post(validPayload({ taskCode }))
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields).toHaveProperty('taskCode')
+    }
+    expect(sheet()).toBeNull()
+  })
+
+  it('rejects a task code that matches no task, without writing a row', () => {
+    const { env, sheet } = setup()
+    const res = env.post(validPayload({ taskCode: 'NOPE1234' }))
+    expect(res.body).toEqual({ ok: false, error: { code: 'INVALID_CODE', message: expect.stringContaining('no longer valid') } })
+    expect(sheet()).toBeNull()
+  })
+
+  it('matches the task code regardless of case, spaces and dashes, and stores the canonical code', () => {
+    const { env, sheet } = setup()
+    expect(env.post(validPayload({ taskCode: ' fbads-001 ' })).body.ok).toBe(true)
+    expect(sheet().rows[1].slice(-2)).toEqual(['FBADS001', 'Facebook Ads review'])
+  })
+
+  it('adds the task columns to a responses tab created before task codes', () => {
+    const { env, spreadsheet } = setup()
+    const sheet = spreadsheet.insertSheet('Evaluations')
+    const oldRow = ['old-id', '2026-01-01T00:00:00.000Z', ...Array(15).fill('x')]
+    sheet.rows.push(HEADERS.slice(0, 17), oldRow)
+    expect(env.post(validPayload()).body.ok).toBe(true)
+    expect(sheet.rows[0]).toEqual(HEADERS)
+    expect(sheet.rows[1]).toEqual(oldRow)
+    expect(sheet.rows[2].slice(-2)).toEqual(['FBADS001', 'Facebook Ads review'])
+  })
+
   it('enforces ALLOWED_ORIGINS when configured', () => {
     const { env, sheet } = setup({ ALLOWED_ORIGINS: 'https://evals.example.com/, http://localhost:5173' })
     expect(env.post(validPayload({ origin: 'https://other.example' })).body.error.code).toBe('FORBIDDEN_ORIGIN')
@@ -229,8 +282,157 @@ describe('Apps Script doPost', () => {
 })
 
 describe('Apps Script doGet', () => {
+  function setupTasks(rows, properties = {}) {
+    const spreadsheet = new FakeSpreadsheet('sheet-123')
+    const tab = spreadsheet.insertSheet(properties.TASK_SHEET_NAME || 'Tasks')
+    tab.rows.push(...rows)
+    const env = createAppsScriptEnv({
+      properties: { SPREADSHEET_ID: 'sheet-123', SHEET_NAME: 'Evaluations', ...properties },
+      spreadsheets: { 'sheet-123': spreadsheet },
+    })
+    return { env, tab }
+  }
+
+  const TASKS = [
+    ['Code', 'Title', 'Task'],
+    ['FBADS001', '  Facebook Ads review  ', 'Step 1: find the worst ad set.\nStep 2: pause it.'],
+    ['SHOP0002', 'Shopify restock', 'Restock the lowest-stock products.'],
+    ['', 'Draft task', 'Not ready yet.'],
+  ]
+
   it('reports readiness', () => {
     const { env } = setup()
     expect(env.get().body).toEqual({ ok: true, service: 'candidate-evaluation', sheet: 'Evaluations' })
+  })
+
+  it('returns only the task whose code matches, keeping line breaks', () => {
+    const { env } = setupTasks(TASKS)
+    expect(env.get({ action: 'task', code: 'FBADS001' }).body).toEqual({
+      ok: true,
+      task: { code: 'FBADS001', title: 'Facebook Ads review', text: 'Step 1: find the worst ad set.\nStep 2: pause it.' },
+    })
+    expect(env.get({ action: 'task', code: 'SHOP0002' }).body.task.title).toBe('Shopify restock')
+  })
+
+  it('matches codes regardless of case, spaces and dashes', () => {
+    const { env } = setupTasks(TASKS)
+    expect(env.get({ action: 'task', code: ' shop-0002 ' }).body.task.code).toBe('SHOP0002')
+  })
+
+  it.each([undefined, '', 'WRONG123', 'FBADS00'])('returns INVALID_CODE and no task text for code %s', (code) => {
+    const { env } = setupTasks(TASKS)
+    const body = env.get({ action: 'task', code }).body
+    expect(body).toEqual({ ok: false, error: { code: 'INVALID_CODE', message: expect.any(String) } })
+    expect(JSON.stringify(body)).not.toMatch(/Facebook|Shopify|Draft/)
+  })
+
+  it('never returns a task whose Code cell is empty', () => {
+    const { env } = setupTasks(TASKS)
+    expect(env.get({ action: 'task', code: '' }).body.ok).toBe(false)
+  })
+
+  it('refuses a code shared by more than one task', () => {
+    const { env } = setupTasks([...TASKS, ['fbads-001', 'Copy', 'Other task']])
+    const body = env.get({ action: 'task', code: 'FBADS001' }).body
+    expect(body.error.code).toBe('CONFIG_ERROR')
+    expect(JSON.stringify(body)).not.toMatch(/Facebook|Other task/)
+  })
+
+  it('finds the columns by header, in any order, ignoring extra columns', () => {
+    const { env } = setupTasks([
+      ['Assigned to', 'task', 'CODE'],
+      ['Sam', 'Do the thing', 'ABCD2345'],
+    ])
+    expect(env.get({ action: 'task', code: 'ABCD2345' }).body.task).toEqual({ code: 'ABCD2345', title: '', text: 'Do the thing' })
+  })
+
+  it('reports a configuration error when the Code or Task header is missing', () => {
+    const { env } = setupTasks([['Field', 'Value'], ['Title', 'x'], ['Task', 'y']])
+    expect(env.get({ action: 'task', code: 'Task' }).body.error.code).toBe('CONFIG_ERROR')
+  })
+
+  it('reads the tasks from TASK_SHEET_NAME when set', () => {
+    const { env } = setupTasks([['Code', 'Task'], ['ROUND222', 'Round 2 task']], { TASK_SHEET_NAME: 'Round 2' })
+    expect(env.get({ action: 'task', code: 'ROUND222' }).body.task.text).toBe('Round 2 task')
+  })
+
+  it('returns INVALID_CODE when the Tasks tab is missing', () => {
+    const env = createAppsScriptEnv({
+      properties: { SPREADSHEET_ID: 'sheet-123' },
+      spreadsheets: { 'sheet-123': new FakeSpreadsheet('sheet-123') },
+    })
+    expect(env.get({ action: 'task', code: 'FBADS001' }).body.error.code).toBe('INVALID_CODE')
+  })
+
+  it('reports a configuration error when the spreadsheet cannot be opened', () => {
+    const { env } = setup({ SPREADSHEET_ID: 'missing' })
+    expect(env.get({ action: 'task', code: 'FBADS001' }).body.error.code).toBe('CONFIG_ERROR')
+  })
+})
+
+describe('Apps Script setupSheet and generateTaskCodes', () => {
+  const CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/
+
+  function emptySetup() {
+    const spreadsheet = new FakeSpreadsheet('sheet-123')
+    const env = createAppsScriptEnv({
+      properties: { SPREADSHEET_ID: 'sheet-123', SHEET_NAME: 'Evaluations' },
+      spreadsheets: { 'sheet-123': spreadsheet },
+    })
+    return { env, spreadsheet }
+  }
+
+  it('creates the response header and a Tasks tab with a coded placeholder task', () => {
+    const { env, spreadsheet } = emptySetup()
+    env.context.setupSheet()
+    expect(spreadsheet.getSheetByName('Evaluations').rows[0]).toEqual(HEADERS)
+    const tasks = spreadsheet.getSheetByName('Tasks')
+    expect(tasks.rows[0]).toEqual(['Code', 'Title', 'Task'])
+    expect(tasks.rows).toHaveLength(2)
+    expect(tasks.rows[1][0]).toMatch(CODE)
+    expect(tasks.frozenRows).toBe(1)
+    expect(env.get({ action: 'task', code: tasks.rows[1][0] }).body.task.title).toBe('Task title')
+  })
+
+  it('copies the task from the old single-task "Task" tab', () => {
+    const { env, spreadsheet } = emptySetup()
+    spreadsheet.insertSheet('Task').rows.push(['Field', 'Value'], ['Title', 'Old title'], ['Task', 'Old text\nline 2'])
+    env.context.setupSheet()
+    const row = spreadsheet.getSheetByName('Tasks').rows[1]
+    expect(row.slice(1)).toEqual(['Old title', 'Old text\nline 2'])
+    expect(row[0]).toMatch(CODE)
+    expect(spreadsheet.getSheetByName('Task').rows).toHaveLength(3)
+  })
+
+  it('keeps an existing Tasks tab and its codes, only filling in missing ones', () => {
+    const { env, spreadsheet } = emptySetup()
+    const tab = addTasksTab(spreadsheet, [
+      ['KEEP2345', 'A', 'Task A'],
+      ['', 'B', 'Task B'],
+      ['', '', ''],
+      ['', '', '=not a formula'],
+    ])
+    env.context.setupSheet()
+    expect(tab.rows[1]).toEqual(['KEEP2345', 'A', 'Task A'])
+    expect(tab.rows[2][0]).toMatch(CODE)
+    expect(tab.rows[3][0]).toBe('')
+    expect(tab.rows[4][0]).toMatch(CODE)
+    expect(tab.formulaCells).toEqual([])
+  })
+
+  it('generateTaskCodes gives every new task a different code and warns about duplicates', () => {
+    const { env, spreadsheet } = emptySetup()
+    const rows = Array.from({ length: 50 }, (_, i) => ['', `Task ${i}`, 'Text'])
+    const tab = addTasksTab(spreadsheet, [['DUPE2345', 'X', 'x'], ['dupe-2345', 'Y', 'y'], ...rows])
+    env.context.generateTaskCodes()
+    const codes = tab.rows.slice(3).map((r) => r[0])
+    expect(codes.every((c) => CODE.test(c))).toBe(true)
+    expect(new Set([...codes, 'DUPE2345']).size).toBe(51)
+    expect(env.logs.flat().join('\n')).toMatch(/DUPE2345 is used by more than one row/)
+  })
+
+  it('generateTaskCodes explains when there is no Tasks tab', () => {
+    const { env } = emptySetup()
+    expect(() => env.context.generateTaskCodes()).toThrow(/Run setupSheet first/)
   })
 })

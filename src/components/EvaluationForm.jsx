@@ -28,7 +28,7 @@ function formatTimestamp(iso) {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
 
-export default function EvaluationForm({ submit = submitEvaluation }) {
+export default function EvaluationForm({ taskCode, submit = submitEvaluation }) {
   const [values, setValues] = useState(() => createInitialValues())
   const [initialValues, setInitialValues] = useState(values)
   const [touched, setTouched] = useState({})
@@ -114,7 +114,7 @@ export default function EvaluationForm({ submit = submitEvaluation }) {
     inFlightRef.current = true
     setStatus({ state: 'submitting' })
     try {
-      const result = await submit(buildPayload(values, submissionIdRef.current))
+      const result = await submit({ ...buildPayload(values, submissionIdRef.current), taskCode })
       resetForm()
       setStatus({ state: 'success', submissionId: result.submissionId, submittedAt: result.submittedAt })
     } catch (error) {

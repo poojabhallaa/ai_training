@@ -10,7 +10,7 @@ function filledValues(overrides = {}) {
     prompt: 'p',
     expectedResult: 'e',
     taskSuccess: 'Partial',
-    whichIsBetter: 'Tie',
+    whichIsBetter: 'N/A',
     latencySeconds: '12.5',
     degradationReason: 'N/A',
     failureTags: ['Timeout'],

@@ -16,6 +16,7 @@ export function validPayload(overrides = {}) {
     stateChangeValidated: 'Yes',
     actualResult: 'Paused ad set B after comparing CPA across 4 ad sets.',
     additionalNotes: 'Clean run.',
+    taskCode: 'FBADS001',
     origin: 'http://localhost:5173',
     ...overrides,
   }
