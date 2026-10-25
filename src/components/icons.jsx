@@ -63,6 +63,25 @@ export function RotateCcwIcon(props) {
   )
 }
 
+export function ImageIcon(props) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+    </Icon>
+  )
+}
+
+export function XIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </Icon>
+  )
+}
+
 export function SpinnerIcon({ className = 'size-4', ...props }) {
   return (
     <Icon className={`${className} animate-spin`} {...props}>

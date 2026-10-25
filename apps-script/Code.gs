@@ -5,13 +5,18 @@
  * preflight) and appends each one as a row in a Google Sheet. Also serves the
  * task shown at the top of the form, read from the "Tasks" tab of the same
  * spreadsheet. Each task has its own access code, and the task is only
- * returned for a matching code (GET ?action=task&code=...).
+ * returned for a matching code (GET ?action=task&code=...). Screenshots sent
+ * with a submission are saved to a Google Drive folder, one subfolder per
+ * submission, and the row links to that subfolder.
  *
  * The defaults below can be overridden in Script Properties
  * (Project Settings > Script Properties):
  *   SPREADSHEET_ID   1GCcvSXo3hH6yuxsi9bVnJitYukiLi2GZO5FYUKXLlBo
  *   SHEET_NAME       Worksheet (tab) that receives the responses.
  *   TASK_SHEET_NAME  Worksheet (tab) that holds the tasks and their codes.
+ *   SCREENSHOTS_FOLDER_ID  Drive folder that receives screenshots. setupSheet
+ *                    creates a "Candidate Evaluation Screenshots" folder and
+ *                    stores its ID here when it is not set.
  *   ALLOWED_ORIGINS  Optional comma-separated list of site origins, e.g.
  *                    "https://example.github.io,http://localhost:5173".
  *                    Apps Script cannot read the real Origin header, so this
@@ -31,6 +36,14 @@ var LEGACY_TASK_SHEET_NAME = 'Task';
 var MAX_TEXT_LENGTH = 50000;
 var MAX_SHORT_TEXT_LENGTH = 200;
 var LOCK_TIMEOUT_MS = 20000;
+
+// Screenshots. The site resizes large images before upload, so these limits
+// are only reached by requests that did not come from the site.
+var MAX_SCREENSHOTS = 10;
+var MAX_SCREENSHOT_BYTES = 3 * 1024 * 1024;
+var MAX_TOTAL_SCREENSHOT_BYTES = 15 * 1024 * 1024;
+var SCREENSHOTS_FOLDER_NAME = 'Candidate Evaluation Screenshots';
+var SCREENSHOT_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 
 var TASK_SUCCESS = ['Pass', 'Partial', 'Fail'];
 var WHICH_IS_BETTER = ['ChatGPT', 'Claude', 'N/A'];
@@ -59,6 +72,7 @@ var COLUMNS = [
   // their positions; ensureHeader_ fills in their headers on older sheets.
   ['taskCode', 'Task Code'],
   ['taskTitle', 'Task Title'],
+  ['screenshots', 'Screenshots'],
 ];
 
 function doPost(e) {
@@ -117,6 +131,8 @@ function setupSheet() {
   ensureHeader_(sheet);
   var taskSheet = ensureTaskSheet_(getSpreadsheet_(config), config);
   Logger.log('Sheets "' + sheet.getName() + '" and "' + taskSheet.getName() + '" are ready.');
+  var folder = ensureScreenshotsFolder_(config);
+  Logger.log('Screenshots are saved to the Drive folder "' + folder.getName() + '": ' + folder.getUrl());
   logCodeChanges_(fillMissingCodes_(taskSheet, config));
 }
 
@@ -167,6 +183,7 @@ function getConfig_() {
     spreadsheetId: (props.getProperty('SPREADSHEET_ID') || '').trim() || DEFAULT_SPREADSHEET_ID,
     sheetName: (props.getProperty('SHEET_NAME') || '').trim() || DEFAULT_SHEET_NAME,
     taskSheetName: (props.getProperty('TASK_SHEET_NAME') || '').trim() || DEFAULT_TASK_SHEET_NAME,
+    screenshotsFolderId: (props.getProperty('SCREENSHOTS_FOLDER_ID') || '').trim(),
     allowedOrigins: origins,
   };
 }
@@ -461,6 +478,10 @@ function validateSubmission_(body) {
     record.failureTags = tags.join(', ');
   }
 
+  var screenshots = validateScreenshots_(body.screenshots);
+  if (screenshots.error) errors.screenshots = screenshots.error;
+  else record.screenshotFiles = screenshots.files;
+
   if (Object.keys(errors).length > 0) {
     throw new ApiError_('VALIDATION_ERROR', 'Some fields are missing or invalid.', errors);
   }
@@ -495,29 +516,132 @@ function findSubmissionRow_(sheet, submissionId) {
 }
 
 function saveRecord_(config, record) {
+  var sheet = getSheet_(config);
+  ensureHeader_(sheet);
+
+  // A retry of a request that already succeeded (e.g. the response was lost)
+  // must not create a second row. Checked before the screenshots are saved so
+  // a retry does not save them twice; checked again under the lock below.
+  var existing = findSubmissionRow_(sheet, record.submissionId);
+  if (existing) return duplicateResult_(record, existing);
+
+  // Saving files can take several seconds, so it happens outside the lock.
+  // The folder is moved to the trash if the row is not written after all.
+  var folder = record.screenshotFiles.length ? saveScreenshots_(config, record) : null;
+  record.screenshots = folder ? folder.getUrl() : '';
+
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
-    throw new ApiError_('BUSY', 'The server is busy. Try again in a moment.');
-  }
   try {
-    var sheet = getSheet_(config);
-    ensureHeader_(sheet);
-
-    // A retry of a request that already succeeded (e.g. the response was lost)
-    // must not create a second row.
-    var existing = findSubmissionRow_(sheet, record.submissionId);
-    if (existing) {
-      return { ok: true, submissionId: record.submissionId, submittedAt: existing.submittedAt, duplicate: true };
+    if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+      throw new ApiError_('BUSY', 'The server is busy. Try again in a moment.');
     }
+    try {
+      ensureHeader_(sheet);
+      existing = findSubmissionRow_(sheet, record.submissionId);
+      if (existing) {
+        if (folder) folder.setTrashed(true);
+        return duplicateResult_(record, existing);
+      }
 
-    record.submittedAt = new Date().toISOString();
-    var row = COLUMNS.map(function (c) { return toCellValue_(record[c[0]]); });
-    var rowNumber = sheet.getLastRow() + 1;
-    sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
-    SpreadsheetApp.flush();
-
-    return { ok: true, submissionId: record.submissionId, submittedAt: record.submittedAt, duplicate: false };
-  } finally {
-    lock.releaseLock();
+      record.submittedAt = new Date().toISOString();
+      var row = COLUMNS.map(function (c) { return toCellValue_(record[c[0]]); });
+      var rowNumber = sheet.getLastRow() + 1;
+      sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
+      SpreadsheetApp.flush();
+    } finally {
+      lock.releaseLock();
+    }
+  } catch (err) {
+    if (folder) folder.setTrashed(true);
+    throw err;
   }
+
+  return { ok: true, submissionId: record.submissionId, submittedAt: record.submittedAt, duplicate: false };
+}
+
+function duplicateResult_(record, existing) {
+  return { ok: true, submissionId: record.submissionId, submittedAt: existing.submittedAt, duplicate: true };
+}
+
+// ---------------------------------------------------------------------------
+// Screenshots
+
+/**
+ * Checks the optional screenshots array: [{ name, type, data }] where data is
+ * base64. Returns { files: [{ name, type, bytes }] } or { error }.
+ */
+function validateScreenshots_(value) {
+  if (value === undefined || value === null) return { files: [] };
+  if (!Array.isArray(value)) return { error: 'Screenshots must be a list of images.' };
+  if (value.length > MAX_SCREENSHOTS) return { error: 'At most ' + MAX_SCREENSHOTS + ' screenshots can be added per submission.' };
+  var files = [];
+  var total = 0;
+  for (var i = 0; i < value.length; i++) {
+    var item = value[i];
+    var label = 'Screenshot ' + (i + 1);
+    if (!item || typeof item !== 'object' || typeof item.data !== 'string' || !SCREENSHOT_TYPES[item.type]) {
+      return { error: label + ' must be a PNG, JPEG, or WebP image.' };
+    }
+    // Checked on the encoded length first, so an oversized request is not decoded.
+    if (item.data.length > Math.ceil(MAX_SCREENSHOT_BYTES / 3) * 4 + 4) return { error: label + ' is larger than 3 MB.' };
+    var bytes;
+    try {
+      bytes = Utilities.base64Decode(item.data);
+    } catch (err) {
+      return { error: label + ' could not be read.' };
+    }
+    if (bytes.length > MAX_SCREENSHOT_BYTES) return { error: label + ' is larger than 3 MB.' };
+    if (!hasImageSignature_(bytes, item.type)) return { error: label + ' is not a valid ' + SCREENSHOT_TYPES[item.type].toUpperCase() + ' image.' };
+    total += bytes.length;
+    if (total > MAX_TOTAL_SCREENSHOT_BYTES) return { error: 'The screenshots add up to more than 15 MB. Remove some and try again.' };
+    files.push({ name: typeof item.name === 'string' ? item.name : '', type: item.type, bytes: bytes });
+  }
+  return { files: files };
+}
+
+/** True when the first bytes match the declared image type, so only real images are stored. */
+function hasImageSignature_(bytes, type) {
+  function at(i) { return bytes[i] & 0xff; }
+  function ascii(i, text) {
+    for (var k = 0; k < text.length; k++) if (at(i + k) !== text.charCodeAt(k)) return false;
+    return true;
+  }
+  if (type === 'image/png') return at(0) === 0x89 && ascii(1, 'PNG');
+  if (type === 'image/jpeg') return at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff;
+  if (type === 'image/webp') return ascii(0, 'RIFF') && ascii(8, 'WEBP');
+  return false;
+}
+
+function ensureScreenshotsFolder_(config) {
+  if (config.screenshotsFolderId) {
+    try {
+      return DriveApp.getFolderById(config.screenshotsFolderId);
+    } catch (err) {
+      console.error(err);
+      throw new ApiError_('CONFIG_ERROR', 'The screenshots folder could not be opened. Check SCREENSHOTS_FOLDER_ID and permissions.');
+    }
+  }
+  var folder = DriveApp.createFolder(SCREENSHOTS_FOLDER_NAME);
+  PropertiesService.getScriptProperties().setProperty('SCREENSHOTS_FOLDER_ID', folder.getId());
+  config.screenshotsFolderId = folder.getId();
+  return folder;
+}
+
+/** Saves the screenshots in a new subfolder named after the submission and returns the subfolder. */
+function saveScreenshots_(config, record) {
+  var parent = ensureScreenshotsFolder_(config);
+  var folder = parent.createFolder(record.dateOfTest + ' ' + record.submissionId);
+  try {
+    record.screenshotFiles.forEach(function (file, i) {
+      var base = file.name.replace(/\.[^.]*$/, '').replace(/[^\w\- ]+/g, '').trim().slice(0, 80);
+      var number = (i < 9 ? '0' : '') + (i + 1);
+      var name = number + (base ? ' ' + base : '') + '.' + SCREENSHOT_TYPES[file.type];
+      folder.createFile(Utilities.newBlob(file.bytes, file.type, name));
+    });
+  } catch (err) {
+    folder.setTrashed(true);
+    console.error(err);
+    throw new ApiError_('SERVER_ERROR', 'The screenshots could not be saved to Google Drive. Try again.');
+  }
+  return folder;
 }

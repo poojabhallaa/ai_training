@@ -49,18 +49,23 @@ function submitButton() {
 }
 
 describe('EvaluationForm', () => {
-  it('renders all sections and no file inputs', () => {
+  it('renders all sections, with screenshots as the only file input', () => {
     const { container } = render(<EvaluationForm submit={vi.fn()} />)
     for (const title of [
       'Basic Information',
       'Prompt and Expected Result',
       'Evaluation of Outcome',
       'Actual Result and Additional Notes',
+      'Screenshots',
       'Submission',
     ]) {
       expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
     }
-    expect(container.querySelector('input[type="file"]')).toBeNull()
+    const fileInputs = container.querySelectorAll('input[type="file"]')
+    expect(fileInputs).toHaveLength(1)
+    expect(fileInputs[0]).toHaveAttribute('accept', 'image/png,image/jpeg,image/webp')
+    expect(fileInputs[0]).toHaveAttribute('multiple')
+    expect(screen.queryByText(/You will see a confirmation once the sheet has recorded it/)).toBeNull()
     expect(container.querySelector('img')).toBeNull()
     // No emoji anywhere in the rendered UI.
     expect(container.textContent).not.toMatch(/\p{Extended_Pictographic}/u)
@@ -266,5 +271,98 @@ describe('EvaluationForm', () => {
     await user.type(screen.getByLabelText(/^Prompt\*/), 'p')
     await user.type(screen.getByLabelText(/^Expected Result/), 'e')
     expect(within(prompt).getByText('Complete')).toBeInTheDocument()
+  })
+})
+
+describe('EvaluationForm screenshots', () => {
+  const png = (name) => new File(['x'], name, { type: 'image/png' })
+  const fakePrepare = vi.fn(async (file) => {
+    if (file.name.startsWith('bad')) {
+      const { ScreenshotError } = await import('../src/lib/screenshots.js')
+      throw new ScreenshotError('could not be opened as an image')
+    }
+    return { id: file.name, name: file.name, type: 'image/png', size: 2048, data: btoa(file.name), previewUrl: `blob:${file.name}` }
+  })
+
+  function fileInput() {
+    return screen.getByLabelText('Add screenshots', { selector: 'input' })
+  }
+
+  it('adds, shows, and removes screenshots', async () => {
+    const user = userEvent.setup()
+    render(<EvaluationForm submit={vi.fn()} prepareScreenshot={fakePrepare} />)
+    await user.upload(fileInput(), [png('one.png'), png('two.png')])
+
+    expect(await screen.findByText('2 of 10 added')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'one.png' })).toHaveAttribute('src', 'blob:one.png')
+    await user.click(screen.getByRole('button', { name: 'Remove one.png' }))
+    expect(screen.queryByRole('img', { name: 'one.png' })).toBeNull()
+    expect(screen.getByText('1 of 10 added')).toBeInTheDocument()
+  })
+
+  it('accepts at most 10 screenshots per submission', async () => {
+    const user = userEvent.setup()
+    render(<EvaluationForm submit={vi.fn()} prepareScreenshot={fakePrepare} />)
+    await user.upload(fileInput(), Array.from({ length: 8 }, (_, i) => png(`a${i}.png`)))
+    await screen.findByText('8 of 10 added')
+    await user.upload(fileInput(), Array.from({ length: 4 }, (_, i) => png(`b${i}.png`)))
+
+    expect(await screen.findByText('10 of 10 added')).toBeInTheDocument()
+    expect(screen.getByText(/up to 10 screenshots per submission, so 2 were not added/)).toBeInTheDocument()
+    expect(screen.getByText('Maximum of 10 screenshots reached')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add screenshots' })).toBeDisabled()
+    expect(screen.getAllByRole('img')).toHaveLength(10)
+  })
+
+  it('explains why a file could not be added and keeps the others', async () => {
+    const user = userEvent.setup()
+    render(<EvaluationForm submit={vi.fn()} prepareScreenshot={fakePrepare} />)
+    await user.upload(fileInput(), [png('good.png'), png('bad.png')])
+    expect(await screen.findByText('bad.png could not be opened as an image.')).toBeInTheDocument()
+    expect(screen.getByText('1 of 10 added')).toBeInTheDocument()
+  })
+
+  it('adds pasted images', async () => {
+    const user = userEvent.setup()
+    render(<EvaluationForm submit={vi.fn()} prepareScreenshot={fakePrepare} />)
+    await user.click(screen.getByRole('group', { name: /Screenshot drop area/ }))
+    await user.paste({ files: [png('pasted.png')] })
+    expect(await screen.findByRole('img', { name: 'pasted.png' })).toBeInTheDocument()
+  })
+
+  it('sends the screenshots with the evaluation and clears them after success', async () => {
+    const user = userEvent.setup()
+    const submit = vi.fn(async (payload) => ({ ok: true, submissionId: payload.submissionId, submittedAt: '2026-10-26T10:00:00.000Z' }))
+    render(<EvaluationForm taskCode="FBADS001" submit={submit} prepareScreenshot={fakePrepare} />)
+    await fillForm(user)
+    await user.upload(fileInput(), [png('one.png'), png('two.png')])
+    await screen.findByText('2 of 10 added')
+    await user.click(submitButton())
+
+    expect(submit.mock.calls[0][0].screenshots).toEqual([
+      { name: 'one.png', type: 'image/png', data: btoa('one.png') },
+      { name: 'two.png', type: 'image/png', data: btoa('two.png') },
+    ])
+    expect(await screen.findByText('Evaluation saved to Google Sheets')).toBeInTheDocument()
+    expect(screen.queryByRole('img')).toBeNull()
+  })
+
+  it('sends an empty list when there are no screenshots', async () => {
+    const user = userEvent.setup()
+    const submit = vi.fn(async (payload) => ({ ok: true, submissionId: payload.submissionId }))
+    render(<EvaluationForm submit={submit} prepareScreenshot={fakePrepare} />)
+    await fillForm(user)
+    await user.click(submitButton())
+    expect(submit.mock.calls[0][0].screenshots).toEqual([])
+  })
+
+  it('asks for confirmation before a reset clears screenshots', async () => {
+    const user = userEvent.setup()
+    render(<EvaluationForm submit={vi.fn()} prepareScreenshot={fakePrepare} />)
+    await user.upload(fileInput(), [png('one.png')])
+    await screen.findByText('1 of 10 added')
+    await user.click(screen.getByRole('button', { name: /Reset Form/ }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Reset Form' }))
+    expect(screen.queryByRole('img')).toBeNull()
   })
 })

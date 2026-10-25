@@ -9,7 +9,8 @@ A single-page form for evaluating candidates on AI connector tasks, such as anal
 ## Features
 
 - Task codes: the page first asks for a task code. Each task in the "Tasks" tab of the Google Sheet has its own code, and only a matching code opens that task and the evaluation form. See [Tasks and task codes](#tasks-and-task-codes).
-- Five sections: Basic Information, Prompt and Expected Result, Evaluation of Outcome, Actual Result and Additional Notes, and Submission
+- Six sections: Basic Information, Prompt and Expected Result, Evaluation of Outcome, Actual Result and Additional Notes, Screenshots, and Submission
+- Optional screenshots: up to 10 images per submission (PNG, JPEG, or WebP), added with the file picker, drag and drop, or paste. They are saved to Google Drive, and the row links to them. See [Screenshots](#screenshots).
 - Inline validation on blur and on submit, with errors shown next to each field and focus moved to the first invalid field
 - Latency must be a non-negative decimal number. Likert score is limited to whole numbers from 1 to 5.
 - Failure Tags is a multi-select. N/A is exclusive and cannot be combined with other tags.
@@ -19,7 +20,7 @@ A single-page form for evaluating candidates on AI connector tasks, such as anal
 - Error messages explain what went wrong, and entered data is kept when a submission fails
 - Each evaluation gets a unique submission ID. Retrying a failed request reuses that ID, so the server never writes a second row for the same evaluation.
 - Reset Form asks for confirmation if any data has been entered
-- Dark, responsive layout tested from 320px to 1440px wide. No emoji and no file or image uploads.
+- Dark, responsive layout tested from 320px to 1440px wide. No emoji.
 
 ## Project structure
 
@@ -46,6 +47,7 @@ scripts/mock-apps-script.mjs  Local stand-in for the Apps Script endpoint
 | Apps Script, Script Properties | `SPREADSHEET_ID` | No | Overrides `DEFAULT_SPREADSHEET_ID` in `Code.gs`. The ID is the part of the sheet URL between `/d/` and `/edit`. |
 | Apps Script, Script Properties | `SHEET_NAME` | No | Overrides the responses tab name, `DEFAULT_SHEET_NAME` (`AI training responses`). The tab is created if missing. |
 | Apps Script, Script Properties | `TASK_SHEET_NAME` | No | Overrides the task tab name, `DEFAULT_TASK_SHEET_NAME` (`Tasks`). |
+| Apps Script, Script Properties | `SCREENSHOTS_FOLDER_ID` | No | Drive folder that receives screenshots. `setupSheet` creates a **Candidate Evaluation Screenshots** folder and sets this for you. Set it yourself to use an existing folder. |
 | Apps Script, Script Properties | `ALLOWED_ORIGINS` | No | Comma-separated site origins allowed to submit, e.g. `https://you.github.io,http://localhost:5173`. See [Security considerations](#security-considerations). |
 
 The spreadsheet ID and tab names have defaults at the top of [`apps-script/Code.gs`](apps-script/Code.gs). Script Properties are optional and only needed to override them without editing the code.
@@ -60,7 +62,7 @@ Frontend `VITE_*` values are compiled into the public JavaScript bundle. They ar
 
 You do not need to create column headers. The backend writes this header row on first use:
 
-`Submission ID | Submission Timestamp | Date of Test | Platform | Model Used | Reasoning / Effort | Prompt | Expected Result | Task Success | Which Is Better | Latency (seconds) | Degradation Reason | Failure Tags | Likert Score | State Change Validated | Actual Result | Additional Notes | Task Code | Task Title`
+`Submission ID | Submission Timestamp | Date of Test | Platform | Model Used | Reasoning / Effort | Prompt | Expected Result | Task Success | Which Is Better | Latency (seconds) | Degradation Reason | Failure Tags | Likert Score | State Change Validated | Actual Result | Additional Notes | Task Code | Task Title | Screenshots`
 
 If the worksheet already has a different header row, the backend refuses to write and returns a configuration error, so data never ends up in the wrong columns.
 
@@ -72,8 +74,8 @@ If the worksheet already has a different header row, the backend refuses to writ
 4. Check `DEFAULT_SPREADSHEET_ID` and `DEFAULT_SHEET_NAME` at the top of `Code.gs`. Optionally, in **Project Settings > Script Properties**, set `SPREADSHEET_ID`, `SHEET_NAME`, `TASK_SHEET_NAME`, or `ALLOWED_ORIGINS` to override them.
 5. Back in the editor, select the `setupSheet` function and click **Run**. Google asks you to authorize the script:
    - Choose your account. If you see "Google hasn't verified this app", click **Advanced > Go to (project name)**. This is expected for your own personal scripts.
-   - Grant the **See, edit, create, and delete your spreadsheets** permission.
-   - The execution log should show `Sheets "AI training responses" and "Tasks" are ready.` followed by the code given to the first task. The header row now appears in the responses tab, and a **Tasks** tab is created. If an older single-task **Task** tab exists, its title and text become the first task; otherwise it is a placeholder.
+   - Grant the **See, edit, create, and delete your spreadsheets** and **See, edit, create, and delete all of your Google Drive files** permissions. Drive access is needed to save screenshots.
+   - The execution log should show `Sheets "AI training responses" and "Tasks" are ready.` then the link to the screenshots folder in Drive and the code given to the first task. The header row now appears in the responses tab, and a **Tasks** tab is created. If an older single-task **Task** tab exists, its title and text become the first task; otherwise it is a placeholder.
 6. Click **Deploy > New deployment**, choose the type **Web app**, and set:
    - **Execute as:** Me
    - **Who has access:** Anyone
@@ -104,6 +106,16 @@ Tasks live in the **Tasks** tab of the same spreadsheet, one per row, so you nev
 - Inside the task text, a line that starts with a known heading followed by a colon, such as `Connector: Facebook Ads`, shows the heading in bold. The headings are Title, Connector, Surface, Platform to be used, Hero Use Case, Power-User Workflow, Why High Value, Key Actions Exercised, State Changing, Setup Difficulty, and Payments/ Real Interactions. Matching ignores case, spaces, and punctuation. To change the list, edit [`src/config/taskHeadings.js`](src/config/taskHeadings.js).
 - After a correct code, it is remembered for that browser tab, so a refresh does not ask again. **Use a different code** in the task box switches tasks.
 - To use a different tab name, set `TASK_SHEET_NAME`.
+
+## Screenshots
+
+The **Screenshots** section is optional. A candidate can add up to 10 images per submission with **Add screenshots**, by dragging files onto the box, or by clicking the box and pasting (Cmd+V or Ctrl+V).
+
+- **Where they go:** each submission with screenshots gets its own subfolder, named `<date of test> <submission ID>`, inside the **Candidate Evaluation Screenshots** folder in the Google Drive of the account that deployed the script. The **Screenshots** column of the row links to that subfolder. Rows without screenshots leave it empty.
+- **Who can see them:** the files are private to that account. To let others open the links, share the **Candidate Evaluation Screenshots** folder with them in Drive.
+- **Size:** images over 1.5 MB are resized in the browser to at most 2560 pixels on the longest side and saved as JPEG, which keeps text readable. Each image can be at most 3 MB after that, and all of them together at most 15 MB, because Apps Script limits how large a request can be.
+- **Checks:** the backend accepts at most 10 images, only PNG, JPEG, and WebP, and checks the file contents as well as the declared type. If the row cannot be written, for example because the server is busy, the saved screenshots are moved to the Drive trash. A retry of a submission that already succeeded does not save them twice.
+- To change the limit of 10, edit `MAX_SCREENSHOTS` in both [`src/lib/screenshots.js`](src/lib/screenshots.js) and [`apps-script/Code.gs`](apps-script/Code.gs), then deploy a new version of the script.
 
 ## 3. Run the frontend locally
 
@@ -164,7 +176,7 @@ Apps Script web apps cannot answer CORS preflight (`OPTIONS`) requests and canno
 
 ## Security considerations
 
-- **No credentials in the frontend.** The script executes as the deploying user. The browser never sees Google credentials, OAuth tokens, or the spreadsheet ID.
+- **No credentials in the frontend.** The script executes as the deploying user. The browser never sees Google credentials, OAuth tokens, the spreadsheet ID, or the Drive folder ID. The script asks for full Drive access because Apps Script's `DriveApp` needs it to create folders and files; it only ever creates files in the screenshots folder.
 - **The endpoint is public.** Anyone who has the `/exec` URL can send a submission. Treat the URL as unlisted: share the site only with evaluators, and note that the page sets `noindex`. The backend limits the damage this can do:
   - Strict validation of every field: required values, allowed choices for Task Success, Which Is Better, and State Change Validated, a non-negative number for latency, an integer from 1 to 5 for the Likert score, and length limits within the 50,000-character Sheets cell limit
   - The script only appends rows. It never returns sheet contents, except to recognize a duplicate submission ID and to return the one task matching a correct code.
@@ -194,6 +206,9 @@ The values for Task Success, Which Is Better, and State Change Validated are als
 | "The server did not confirm the code" | The Apps Script deployment still runs the version from before task codes. Deploy a **New version**. |
 | "This code is assigned to more than one task" | Two rows in the Tasks tab have the same code. Give one of them a new code. |
 | "Submissions from this site are not allowed" | The site origin is not listed in `ALLOWED_ORIGINS`. |
+| "The screenshots could not be saved to Google Drive" | The deploying account is out of Drive storage, or Drive had a temporary problem. Check **Executions** in the Apps Script editor. |
+| "The screenshots folder could not be opened" | `SCREENSHOTS_FOLDER_ID` points to a folder that was deleted or that the deploying account cannot edit. Delete the property and run `setupSheet` to create a new folder. |
+| Screenshot uploads fail right after updating the script | The new Drive permission has not been granted yet. Run `setupSheet` once in the editor, accept the permissions, and deploy a **New version**. |
 | Changes to `Code.gs` have no effect | You need to deploy a **New version** of the existing deployment. |
 | Executions fail with no clear error | Check **Executions** in the Apps Script editor for logs. |
 
@@ -205,7 +220,8 @@ npm test
 
 - `tests/validation.test.js`: required fields, latency and Likert rules, date validation, length limits
 - `tests/submitEvaluation.test.js`: request format (no preflight), confirmation handling, backend errors, non-JSON responses, HTTP errors, network errors, timeouts
-- `tests/EvaluationForm.test.jsx`: inline errors, focusing the first invalid field, latency and Likert validation, the N/A rule for failure tags, the loading state, duplicate-submission prevention, data kept on failure, retries with the same ID, reset confirmation, and checks that there are no emoji or file inputs
-- `tests/appsScript.test.js`: runs `Code.gs` and checks for exactly one row per submission, column order, multiline and special characters, formula escaping, duplicate IDs, malformed and invalid requests, configuration errors, lock contention, `ALLOWED_ORIGINS`, task codes (lookup, normalization, duplicates, submissions without a valid code), adding the task columns to an older responses tab, `setupSheet`, and `generateTaskCodes`
+- `tests/EvaluationForm.test.jsx`: inline errors, focusing the first invalid field, latency and Likert validation, the N/A rule for failure tags, the loading state, duplicate-submission prevention, data kept on failure, retries with the same ID, reset confirmation, adding, removing, and pasting screenshots, the limit of 10, and checks that there are no emoji
+- `tests/appsScript.test.js`: runs `Code.gs` and checks for exactly one row per submission, column order, multiline and special characters, formula escaping, duplicate IDs, malformed and invalid requests, configuration errors, lock contention, `ALLOWED_ORIGINS`, task codes (lookup, normalization, duplicates, submissions without a valid code), adding the task columns to an older responses tab, screenshots (Drive folders, limits, type checks, cleanup on failure, retries), `setupSheet`, and `generateTaskCodes`
 - `tests/TaskBox.test.jsx`: task box content and headings, and the task request
 - `tests/App.test.jsx`: the code screen, wrong codes, remembering and re-checking a code, and switching codes
+- `tests/screenshots.test.js`: keeping small images, resizing large ones, and rejecting unsupported or broken files

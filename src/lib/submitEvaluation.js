@@ -28,7 +28,8 @@ export function createSubmissionId() {
 export async function submitEvaluation(payload, options = {}) {
   const {
     endpoint = import.meta.env.VITE_APPS_SCRIPT_URL,
-    timeoutMs = 30000,
+    // Saving screenshots to Drive takes a few seconds per image.
+    timeoutMs = payload?.screenshots?.length ? 120000 : 30000,
     fetchImpl = globalThis.fetch,
     origin = globalThis.location?.origin ?? '',
   } = options

@@ -25,7 +25,13 @@ const HEADERS = [
   'Additional Notes',
   'Task Code',
   'Task Title',
+  'Screenshots',
 ]
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]).toString('base64')
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9]).toString('base64')
+const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0, 0, 0, 0]), Buffer.from('WEBPVP8 ')]).toString('base64')
+const shot = (overrides = {}) => ({ name: 'Ads Manager.png', type: 'image/png', data: PNG, ...overrides })
 
 function addTasksTab(spreadsheet, rows = [['FBADS001', 'Facebook Ads review', 'Pause the worst ad set.']]) {
   const tab = spreadsheet.insertSheet('Tasks')
@@ -79,6 +85,7 @@ describe('Apps Script doPost', () => {
       'Clean run.',
       'FBADS001',
       'Facebook Ads review',
+      '',
     ])
   })
 
@@ -235,7 +242,7 @@ describe('Apps Script doPost', () => {
     const { env, sheet } = setup()
     env.setLockAvailable(false)
     expect(env.post(validPayload()).body.error.code).toBe('BUSY')
-    expect(sheet()).toBeNull()
+    expect(sheet().rows).toEqual([HEADERS])
   })
 
   it('requires a task code', () => {
@@ -258,7 +265,7 @@ describe('Apps Script doPost', () => {
   it('matches the task code regardless of case, spaces and dashes, and stores the canonical code', () => {
     const { env, sheet } = setup()
     expect(env.post(validPayload({ taskCode: ' fbads-001 ' })).body.ok).toBe(true)
-    expect(sheet().rows[1].slice(-2)).toEqual(['FBADS001', 'Facebook Ads review'])
+    expect(sheet().rows[1].slice(-3, -1)).toEqual(['FBADS001', 'Facebook Ads review'])
   })
 
   it('adds the task columns to a responses tab created before task codes', () => {
@@ -269,7 +276,7 @@ describe('Apps Script doPost', () => {
     expect(env.post(validPayload()).body.ok).toBe(true)
     expect(sheet.rows[0]).toEqual(HEADERS)
     expect(sheet.rows[1]).toEqual(oldRow)
-    expect(sheet.rows[2].slice(-2)).toEqual(['FBADS001', 'Facebook Ads review'])
+    expect(sheet.rows[2].slice(-3, -1)).toEqual(['FBADS001', 'Facebook Ads review'])
   })
 
   it('enforces ALLOWED_ORIGINS when configured', () => {
@@ -278,6 +285,112 @@ describe('Apps Script doPost', () => {
     expect(env.post(validPayload({ origin: undefined })).body.error.code).toBe('FORBIDDEN_ORIGIN')
     expect(env.post(validPayload({ origin: 'https://evals.example.com' })).body.ok).toBe(true)
     expect(sheet().rows).toHaveLength(2)
+  })
+})
+
+describe('Apps Script screenshots', () => {
+  function screenshotFolders(env) {
+    return [...env.drive.folders.values()].filter((f) => f.name !== 'Candidate Evaluation Screenshots')
+  }
+
+  it('saves screenshots to a subfolder per submission and links it in the row', () => {
+    const { env, sheet } = setup()
+    const res = env.post(
+      validPayload({ screenshots: [shot(), shot({ name: 'step 2 <final>.jpg', type: 'image/jpeg', data: JPEG }), shot({ name: '', type: 'image/webp', data: WEBP })] }),
+    )
+    expect(res.body.ok).toBe(true)
+
+    const parentId = env.properties.SCREENSHOTS_FOLDER_ID
+    const parent = env.drive.folders.get(parentId)
+    expect(parent.name).toBe('Candidate Evaluation Screenshots')
+    expect(parent.children).toHaveLength(1)
+    const folder = parent.children[0]
+    expect(folder.name).toBe(`2026-10-25 ${validPayload().submissionId}`)
+    expect(folder.files.map((f) => [f.name, f.type])).toEqual([
+      ['01 Ads Manager.png', 'image/png'],
+      ['02 step 2 final.jpg', 'image/jpeg'],
+      ['03.webp', 'image/webp'],
+    ])
+    expect(Buffer.from(folder.files[0].bytes.map((b) => b & 0xff)).toString('base64')).toBe(PNG)
+    expect(sheet().rows[1].at(-1)).toBe(folder.getUrl())
+  })
+
+  it('reuses the configured screenshots folder', () => {
+    const { env } = setup()
+    const existing = env.context.DriveApp.createFolder('My folder')
+    env.setProperty('SCREENSHOTS_FOLDER_ID', existing.getId())
+    env.post(validPayload({ screenshots: [shot()] }))
+    expect(existing.children).toHaveLength(1)
+  })
+
+  it('creates no folder when there are no screenshots', () => {
+    const { env, sheet } = setup()
+    expect(env.post(validPayload({ screenshots: [] })).body.ok).toBe(true)
+    expect(env.drive.folders.size).toBe(0)
+    expect(sheet().rows[1].at(-1)).toBe('')
+  })
+
+  it.each([
+    ['more than 10 screenshots', Array.from({ length: 11 }, () => shot()), /At most 10/],
+    ['a non-list value', 'nope', /must be a list/],
+    ['an unsupported type', [shot({ type: 'image/gif' })], /PNG, JPEG, or WebP/],
+    ['missing data', [shot({ data: undefined })], /PNG, JPEG, or WebP/],
+    ['invalid base64', [shot({ data: '***' })], /could not be read/],
+    ['bytes that do not match the type', [shot({ type: 'image/jpeg' })], /not a valid JPG/],
+    ['a file over 3 MB', [shot({ data: Buffer.alloc(3 * 1024 * 1024 + 1).toString('base64') })], /larger than 3 MB/],
+  ])('rejects %s without saving anything', (_name, screenshots, message) => {
+    const { env, sheet } = setup()
+    const res = env.post(validPayload({ screenshots }))
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.fields.screenshots).toMatch(message)
+    expect(env.drive.folders.size).toBe(0)
+    expect(sheet()).toBeNull()
+  })
+
+  it('rejects screenshots that add up to more than 15 MB', () => {
+    const { env } = setup()
+    const big = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(3 * 1024 * 1024 - 4)]).toString('base64')
+    const res = env.post(validPayload({ screenshots: Array.from({ length: 6 }, () => shot({ data: big })) }))
+    expect(res.body.error.fields.screenshots).toMatch(/more than 15 MB/)
+  })
+
+  it('does not save the screenshots again when a successful submission is retried', () => {
+    const { env, sheet } = setup()
+    env.post(validPayload({ screenshots: [shot()] }))
+    expect(env.post(validPayload({ screenshots: [shot()] })).body.duplicate).toBe(true)
+    expect(screenshotFolders(env)).toHaveLength(1)
+    expect(sheet().rows).toHaveLength(2)
+  })
+
+  it('trashes the saved screenshots when the row cannot be written', () => {
+    const { env, sheet } = setup()
+    env.setLockAvailable(false)
+    expect(env.post(validPayload({ screenshots: [shot()] })).body.error.code).toBe('BUSY')
+    const [folder] = screenshotFolders(env)
+    expect(folder.trashed).toBe(true)
+    expect(sheet().rows).toHaveLength(1)
+  })
+
+  it('reports a Drive failure without writing a row, and trashes the partial folder', () => {
+    const { env, sheet } = setup()
+    env.drive.failCreateFile = true
+    const res = env.post(validPayload({ screenshots: [shot()] }))
+    expect(res.body.error).toEqual({ code: 'SERVER_ERROR', message: expect.stringContaining('Google Drive') })
+    expect(screenshotFolders(env)[0].trashed).toBe(true)
+    expect(sheet().rows).toHaveLength(1)
+  })
+
+  it('setupSheet creates the screenshots folder once and stores its ID', () => {
+    const { env } = setup()
+    env.context.setupSheet()
+    env.context.setupSheet()
+    expect(env.drive.folders.size).toBe(1)
+    expect(env.properties.SCREENSHOTS_FOLDER_ID).toBe([...env.drive.folders.keys()][0])
+  })
+
+  it('reports a configuration error when SCREENSHOTS_FOLDER_ID is wrong', () => {
+    const { env } = setup({ SCREENSHOTS_FOLDER_ID: 'missing' })
+    expect(env.post(validPayload({ screenshots: [shot()] })).body.error.code).toBe('CONFIG_ERROR')
   })
 })
 

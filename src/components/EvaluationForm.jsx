@@ -15,6 +15,7 @@ import { buildPayload, createInitialValues, FIELD_ORDER, SECTION_FIELDS, validat
 import { createSubmissionId, submitEvaluation } from '../lib/submitEvaluation.js'
 import { ChipMultiSelect, LikertScale, SegmentedControl, Select, TextArea, TextInput } from './fields.jsx'
 import { ConfirmDialog, FormSection, StatusBanner } from './layout.jsx'
+import ScreenshotUpload from './ScreenshotUpload.jsx'
 import { RotateCcwIcon, SpinnerIcon } from './icons.jsx'
 
 function isEqualValues(a, b) {
@@ -28,13 +29,15 @@ function formatTimestamp(iso) {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
 
-export default function EvaluationForm({ taskCode, submit = submitEvaluation }) {
+export default function EvaluationForm({ taskCode, submit = submitEvaluation, prepareScreenshot }) {
   const [values, setValues] = useState(() => createInitialValues())
   const [initialValues, setInitialValues] = useState(values)
   const [touched, setTouched] = useState({})
   const [submitAttempted, setSubmitAttempted] = useState(false)
   const [status, setStatus] = useState({ state: 'idle' })
   const [confirmResetOpen, setConfirmResetOpen] = useState(false)
+  const [screenshots, setScreenshots] = useState([])
+  const [preparingScreenshots, setPreparingScreenshots] = useState(false)
 
   // One ID per evaluation. It is kept across failed attempts so a retry of a
   // request that actually reached the sheet is recognised as a duplicate.
@@ -46,7 +49,7 @@ export default function EvaluationForm({ taskCode, submit = submitEvaluation }) 
   const errors = useMemo(() => validate(values), [values])
   const errorCount = Object.keys(errors).length
   const submitting = status.state === 'submitting'
-  const dirty = !isEqualValues(values, initialValues)
+  const dirty = !isEqualValues(values, initialValues) || screenshots.length > 0
 
   const sectionComplete = (section) => SECTION_FIELDS[section].every((field) => !errors[field])
   const visibleError = (field) => (submitAttempted || touched[field] ? errors[field] : undefined)
@@ -95,12 +98,13 @@ export default function EvaluationForm({ taskCode, submit = submitEvaluation }) 
     setInitialValues(fresh)
     setTouched({})
     setSubmitAttempted(false)
+    setScreenshots([])
     submissionIdRef.current = createSubmissionId()
   }
 
   async function handleSubmit(event) {
     event.preventDefault()
-    if (inFlightRef.current) return
+    if (inFlightRef.current || preparingScreenshots) return
     setSubmitAttempted(true)
 
     const currentErrors = validate(values)
@@ -114,7 +118,11 @@ export default function EvaluationForm({ taskCode, submit = submitEvaluation }) 
     inFlightRef.current = true
     setStatus({ state: 'submitting' })
     try {
-      const result = await submit({ ...buildPayload(values, submissionIdRef.current), taskCode })
+      const result = await submit({
+        ...buildPayload(values, submissionIdRef.current),
+        taskCode,
+        screenshots: screenshots.map(({ name, type, data }) => ({ name, type, data })),
+      })
       resetForm()
       setStatus({ state: 'success', submissionId: result.submissionId, submittedAt: result.submittedAt })
     } catch (error) {
@@ -280,14 +288,26 @@ export default function EvaluationForm({ taskCode, submit = submitEvaluation }) 
           />
         </FormSection>
 
+        <FormSection
+          id="section-screenshots"
+          number="05"
+          title="Screenshots"
+          description="Optional. Add screenshots of the run, such as the model's response or the change in the connected tool."
+        >
+          <ScreenshotUpload
+            value={screenshots}
+            onChange={setScreenshots}
+            disabled={submitting}
+            onProcessingChange={setPreparingScreenshots}
+            {...(prepareScreenshot ? { prepare: prepareScreenshot } : {})}
+          />
+        </FormSection>
+
         <section aria-labelledby="section-submit-title" className="rounded-xl border border-line bg-surface p-5 sm:p-7">
-          <p className="mb-1 font-mono text-xs tracking-wider text-fg-subtle">05</p>
+          <p className="mb-1 font-mono text-xs tracking-wider text-fg-subtle">06</p>
           <h2 id="section-submit-title" className="text-base font-semibold text-fg sm:text-lg">
             Submission
           </h2>
-          <p className="mt-1 text-sm text-fg-muted">
-            The evaluation is saved to Google Sheets. You will see a confirmation once the sheet has recorded it.
-          </p>
 
           <div className="mt-5 empty:hidden">
             {status.state === 'invalid' && errorCount > 0 && (
@@ -323,12 +343,14 @@ export default function EvaluationForm({ taskCode, submit = submitEvaluation }) 
               <RotateCcwIcon className="size-4" />
               Reset Form
             </button>
-            <button type="submit" disabled={submitting} className="btn-primary sm:min-w-48">
+            <button type="submit" disabled={submitting || preparingScreenshots} className="btn-primary sm:min-w-48">
               {submitting ? (
                 <>
                   <SpinnerIcon className="size-4" />
-                  Submitting...
+                  {screenshots.length ? 'Uploading...' : 'Submitting...'}
                 </>
+              ) : preparingScreenshots ? (
+                'Preparing screenshots...'
               ) : (
                 'Submit Evaluation'
               )}

@@ -91,18 +91,63 @@ export class FakeSpreadsheet {
   }
 }
 
+// In-memory Drive: folders hold files ({ name, type, bytes }) and subfolders.
+export class FakeFolder {
+  constructor(drive, name) {
+    this.drive = drive
+    this.id = `folder-${drive.folders.size + 1}`
+    this.name = name
+    this.files = []
+    this.children = []
+    this.trashed = false
+    drive.folders.set(this.id, this)
+  }
+
+  getId() {
+    return this.id
+  }
+
+  getName() {
+    return this.name
+  }
+
+  getUrl() {
+    return `https://drive.google.com/drive/folders/${this.id}`
+  }
+
+  createFolder(name) {
+    const folder = new FakeFolder(this.drive, name)
+    this.children.push(folder)
+    return folder
+  }
+
+  createFile(blob) {
+    if (this.drive.failCreateFile) throw new Error('Drive quota exceeded')
+    this.files.push(blob)
+    return blob
+  }
+
+  setTrashed(trashed) {
+    this.trashed = trashed
+  }
+}
+
 export function createAppsScriptEnv({ properties = {}, spreadsheets = {}, activeSpreadsheet = null } = {}) {
   const props = { ...properties }
   const spreadsheetMap = new Map(Object.entries(spreadsheets))
   const logs = []
   let lockHeld = false
   let lockAvailable = true
+  const drive = { folders: new Map(), failCreateFile: false }
 
   const context = {
     console: { error: (...args) => logs.push(args), log: (...args) => logs.push(args) },
     Logger: { log: (...args) => logs.push(args) },
     PropertiesService: {
-      getScriptProperties: () => ({ getProperty: (key) => (key in props ? props[key] : null) }),
+      getScriptProperties: () => ({
+        getProperty: (key) => (key in props ? props[key] : null),
+        setProperty: (key, value) => (props[key] = value),
+      }),
     },
     SpreadsheetApp: {
       openById(id) {
@@ -111,6 +156,21 @@ export function createAppsScriptEnv({ properties = {}, spreadsheets = {}, active
       },
       getActiveSpreadsheet: () => activeSpreadsheet,
       flush() {},
+    },
+    DriveApp: {
+      getFolderById(id) {
+        if (!drive.folders.has(id)) throw new Error(`Folder not found: ${id}`)
+        return drive.folders.get(id)
+      },
+      createFolder: (name) => new FakeFolder(drive, name),
+    },
+    Utilities: {
+      // Like Apps Script, returns signed bytes and throws on invalid input.
+      base64Decode(data) {
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) throw new Error('Could not decode string.')
+        return [...Buffer.from(data, 'base64')].map((b) => (b > 127 ? b - 256 : b))
+      },
+      newBlob: (bytes, type, name) => ({ bytes, type, name }),
     },
     LockService: {
       getScriptLock: () => ({
@@ -158,6 +218,8 @@ export function createAppsScriptEnv({ properties = {}, spreadsheets = {}, active
     post,
     get,
     logs,
+    drive,
+    properties: props,
     setProperty: (key, value) => (props[key] = value),
     setLockAvailable: (available) => (lockAvailable = available),
   }
