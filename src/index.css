@@ -1,0 +1,75 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --color-canvas: #050505;
+  --color-surface: #0d0d0d;
+  --color-surface-raised: #141414;
+  --color-line: #232323;
+  --color-line-strong: #3a3a3a;
+  --color-fg: #ededed;
+  --color-fg-muted: #9a9a9a;
+  --color-fg-subtle: #6b6b6b;
+  --color-accent: #3ecf8e;
+  --color-danger: #f06b6b;
+  --color-warning: #e0b453;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background-color: var(--color-canvas);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-canvas);
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    background-color: rgb(255 255 255 / 0.18);
+  }
+
+  input[type='date']::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.6;
+  }
+}
+
+@layer components {
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium transition-colors duration-150 outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-primary {
+    @apply bg-fg text-canvas hover:bg-white focus-visible:ring-white/40;
+  }
+
+  .btn-secondary {
+    @apply border border-line bg-transparent text-fg-muted hover:border-line-strong hover:text-fg focus-visible:ring-white/20;
+  }
+
+  .btn-danger {
+    @apply border border-danger/40 bg-danger/10 text-danger hover:bg-danger/20 focus-visible:ring-danger/30;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
