@@ -4,8 +4,10 @@
 // (Access-Control-Allow-Origin: *, no preflight support).
 //
 //   npm run mock:backend            # http://localhost:8787/exec
-//   GET  /exec?action=task&code=FBADS001   # task for a code (also SHOPIFY2)
+//   GET  /exec?action=task&code=FBADS001   # task for a code (also SHOPIFY2,
+//                                   # and the slides tasks SLIDES03, SLIDES02)
 //   GET  /rows                      # inspect stored rows as JSON
+//   GET  /rows?tab=slides           # inspect stored slides evaluations
 //   GET  /mode?fail=1&delay=3000    # simulate server errors / slow responses
 //   GET  /mode                      # back to normal behaviour
 
@@ -35,6 +37,25 @@ spreadsheet.insertSheet('Tasks').rows.push(
   ],
   ['SHOPIFY2', 'Shopify inventory restock', 'Connector: Shopify\nHero Use Case: Restock the three lowest-stock products'],
 )
+// The Drive file IDs are placeholders, so the previews show Drive's "file not
+// found" page. Put real IDs of files shared with "Anyone with the link" here
+// to see actual slides.
+const deck = (id) => `https://drive.google.com/file/d/${id}/view?usp=drive_link`
+const request =
+  'Please create a PowerPoint presentation comparing annual leases and short-term rentals for four single family homes in Ft. Lauderdale, and recommend one clear path that maximizes total profit after a three-year hold.'
+spreadsheet.insertSheet('Slides Tasks').rows.push(
+  ['Code', 'Title', 'User request', 'Input files', 'Response A', 'Response B', 'Response C'],
+  [
+    'SLIDES03',
+    'Rental strategy deck - graphics heavy',
+    request,
+    'image.webp\n2024_20P.pdf | https://example.com/2024_20P.pdf\n801 NW 24th St, Fort Lauderdale, FL 33311 (1).xlsx',
+    deck('mockResponseA1234567890'),
+    deck('mockResponseB1234567890'),
+    deck('mockResponseC1234567890'),
+  ],
+  ['SLIDES02', '', request, '', deck('mockResponseA1234567890'), deck('mockResponseB1234567890'), ''],
+)
 const env = createAppsScriptEnv({
   properties: { SPREADSHEET_ID: 'local-mock', SHEET_NAME: 'Evaluations' },
   spreadsheets: { 'local-mock': spreadsheet },
@@ -56,7 +77,7 @@ createServer((req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/rows') {
-    const sheet = spreadsheet.getSheetByName('Evaluations')
+    const sheet = spreadsheet.getSheetByName(url.searchParams.get('tab') === 'slides' ? 'Slides eval responses' : 'Evaluations')
     return send(res, 200, { rows: sheet ? sheet.rows : [], formulaCells: sheet ? sheet.formulaCells : [] })
   }
 
@@ -84,5 +105,5 @@ createServer((req, res) => {
   })
 }).listen(PORT, () => {
   console.log(`Mock Apps Script listening on http://localhost:${PORT}/exec (rows at /rows)`)
-  console.log('Sample task codes: FBADS001, SHOPIFY2')
+  console.log('Sample task codes: FBADS001, SHOPIFY2, and slides tasks SLIDES03 (3 responses), SLIDES02 (2 responses)')
 })

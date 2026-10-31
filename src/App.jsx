@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import EvaluationForm from './components/EvaluationForm.jsx'
+import SlidesEvaluation from './components/SlidesEvaluation.jsx'
 import TaskBox from './components/TaskBox.jsx'
 import TaskCodeGate from './components/TaskCodeGate.jsx'
 import { AlertCircleIcon, SpinnerIcon } from './components/icons.jsx'
@@ -66,6 +67,30 @@ export default function App({ loadTask = fetchTask }) {
     setAccess({ status: 'locked' })
   }
 
+  const changeCodeDialog = (
+    <ConfirmDialog
+      open={confirmChangeOpen}
+      title="Use a different code?"
+      message="You will be asked for a new task code. Any answers you have not submitted will be cleared."
+      confirmLabel="Use a different code"
+      onCancel={() => setConfirmChangeOpen(false)}
+      onConfirm={() => {
+        setConfirmChangeOpen(false)
+        lock()
+      }}
+    />
+  )
+
+  // Slides tasks have their own full-width page.
+  if (access.status === 'unlocked' && access.task.type === 'slides') {
+    return (
+      <>
+        <SlidesEvaluation key={access.task.code} task={access.task} onChangeCode={() => setConfirmChangeOpen(true)} />
+        {changeCodeDialog}
+      </>
+    )
+  }
+
   return (
     <div className="min-h-dvh bg-canvas text-fg">
       <main className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
@@ -120,17 +145,7 @@ export default function App({ loadTask = fetchTask }) {
         )}
       </main>
 
-      <ConfirmDialog
-        open={confirmChangeOpen}
-        title="Use a different code?"
-        message="You will be asked for a new task code. Any answers you have not submitted will be cleared."
-        confirmLabel="Use a different code"
-        onCancel={() => setConfirmChangeOpen(false)}
-        onConfirm={() => {
-          setConfirmChangeOpen(false)
-          lock()
-        }}
-      />
+      {changeCodeDialog}
     </div>
   )
 }

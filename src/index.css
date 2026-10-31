@@ -15,6 +15,12 @@
   --color-accent: #3ecf8e;
   --color-danger: #f06b6b;
   --color-warning: #e0b453;
+
+  /* Slides evaluation page: top bar, selected tab and button, file names. */
+  --color-topbar: #353c49;
+  --color-topbar-muted: #a9b0bc;
+  --color-selected: #6d6c80;
+  --color-file: #a9dc8f;
 }
 
 @layer base {
@@ -36,6 +42,19 @@
 
   ::selection {
     background-color: rgb(255 255 255 / 0.18);
+  }
+
+  /* The slides evaluation page uses the greyer palette of its reference
+     design. Overriding the tokens here recolors every utility inside it. */
+  .theme-slides {
+    --color-canvas: #1f1f1f;
+    --color-surface: #262626;
+    --color-surface-raised: #1f1f1f;
+    --color-line: #3b3b3b;
+    --color-line-strong: #565656;
+    --color-fg: #ececec;
+    --color-fg-muted: #b4b4b4;
+    --color-fg-subtle: #858585;
   }
 
   input[type='date']::-webkit-calendar-picker-indicator {

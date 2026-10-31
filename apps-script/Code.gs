@@ -9,11 +9,18 @@
  * with a submission are saved to a Google Drive folder, one subfolder per
  * submission, and the row links to that subfolder.
  *
+ * Slides evaluation tasks live in a second tab, "Slides Tasks". Each one links
+ * two or three presentations in Google Drive (Response A, B and C) that the
+ * evaluator rates on six axes and then ranks. Those answers go to their own
+ * tab, "Slides eval responses". Codes are unique across both task tabs.
+ *
  * The defaults below can be overridden in Script Properties
  * (Project Settings > Script Properties):
  *   SPREADSHEET_ID   1GCcvSXo3hH6yuxsi9bVnJitYukiLi2GZO5FYUKXLlBo
  *   SHEET_NAME       Worksheet (tab) that receives the responses.
  *   TASK_SHEET_NAME  Worksheet (tab) that holds the tasks and their codes.
+ *   SLIDES_SHEET_NAME       Worksheet (tab) that receives slides evaluations.
+ *   SLIDES_TASK_SHEET_NAME  Worksheet (tab) that holds the slides tasks.
  *   SCREENSHOTS_FOLDER_ID  Drive folder that receives screenshots. setupSheet
  *                    creates a "Candidate Evaluation Screenshots" folder and
  *                    stores its ID here when it is not set.
@@ -30,6 +37,8 @@
 var DEFAULT_SPREADSHEET_ID = '1GCcvSXo3hH6yuxsi9bVnJitYukiLi2GZO5FYUKXLlBo';
 var DEFAULT_SHEET_NAME = 'AI training responses';
 var DEFAULT_TASK_SHEET_NAME = 'Tasks';
+var DEFAULT_SLIDES_SHEET_NAME = 'Slides eval responses';
+var DEFAULT_SLIDES_TASK_SHEET_NAME = 'Slides Tasks';
 // Single-task tab used before task codes existed. setupSheet copies its task
 // into the Tasks tab.
 var LEGACY_TASK_SHEET_NAME = 'Task';
@@ -75,25 +84,63 @@ var COLUMNS = [
   ['screenshots', 'Screenshots'],
 ];
 
+// Slides evaluations: each response is rated on these axes from 1 to 7, with a
+// written explanation for every rating. [payload key, column header].
+var SLIDES_AXES = [
+  ['contentQuality', 'Content Quality'],
+  ['storytelling', 'Storytelling'],
+  ['writingStyle', 'Writing Style'],
+  ['aesthetics', 'Aesthetics'],
+  ['layout', 'Layout'],
+  ['overall', 'Overall'],
+];
+var SLIDES_RATING_MAX = 7;
+var SLIDES_RESPONSE_LABELS = ['A', 'B', 'C'];
+
+// Columns of the slides responses tab. A task with two responses leaves the
+// Response C columns and Rank 3 empty.
+var SLIDES_COLUMNS = (function () {
+  var columns = [
+    ['submissionId', 'Submission ID'],
+    ['submittedAt', 'Submission Timestamp'],
+    ['taskCode', 'Task Code'],
+    ['taskTitle', 'Task Title'],
+  ];
+  SLIDES_RESPONSE_LABELS.forEach(function (label) {
+    SLIDES_AXES.forEach(function (axis) {
+      columns.push([label + '_' + axis[0], 'Response ' + label + ' ' + axis[1]]);
+      columns.push([label + '_' + axis[0] + 'Explanation', 'Response ' + label + ' ' + axis[1] + ' Explanation']);
+    });
+  });
+  SLIDES_RESPONSE_LABELS.forEach(function (label, i) {
+    columns.push(['rank' + (i + 1), 'Rank ' + (i + 1)]);
+  });
+  columns.push(['rankingReason', 'Ranking Reason']);
+  return columns;
+})();
+
 function doPost(e) {
   try {
     var body = parseBody_(e);
     var config = getConfig_();
     checkOrigin_(config, body.origin);
+    if (body.kind === 'slides') return jsonResponse_(saveSlidesSubmission_(config, body));
     var record = validateSubmission_(body);
     var task = findTask_(getSpreadsheet_(config), config, record.taskCode);
-    if (!task) {
-      throw new ApiError_(
-        'INVALID_CODE',
-        'The task code is no longer valid, so the evaluation could not be saved. Ask the person who gave you the code.'
-      );
-    }
+    if (!task || task.type === 'slides') throw invalidSubmissionCode_();
     record.taskCode = task.code;
     record.taskTitle = task.title;
     return jsonResponse_(saveRecord_(config, record));
   } catch (err) {
     return jsonResponse_(errorBody_(err));
   }
+}
+
+function invalidSubmissionCode_() {
+  return new ApiError_(
+    'INVALID_CODE',
+    'The task code is no longer valid, so the evaluation could not be saved. Ask the person who gave you the code.'
+  );
 }
 
 /**
@@ -121,31 +168,41 @@ function doGet(e) {
 
 /**
  * Run once from the Apps Script editor (select "setupSheet" and click Run).
- * Grants spreadsheet permissions, writes the response header row, and creates
- * the Tasks tab if it does not exist yet. The first task is copied from the
- * old single-task "Task" tab when there is one, otherwise it is a placeholder.
+ * Grants spreadsheet permissions, writes the response header rows, and creates
+ * the Tasks and Slides Tasks tabs if they do not exist yet. The first task is
+ * copied from the old single-task "Task" tab when there is one, otherwise it is
+ * a placeholder. The Slides Tasks tab starts with only its header row.
  */
 function setupSheet() {
   var config = getConfig_();
+  var spreadsheet = getSpreadsheet_(config);
   var sheet = getSheet_(config);
   ensureHeader_(sheet);
-  var taskSheet = ensureTaskSheet_(getSpreadsheet_(config), config);
+  var taskSheet = ensureTaskSheet_(spreadsheet, config);
   Logger.log('Sheets "' + sheet.getName() + '" and "' + taskSheet.getName() + '" are ready.');
+  var slidesSheet = getSheet_(config, config.slidesSheetName);
+  ensureHeader_(slidesSheet, SLIDES_COLUMNS);
+  var slidesTaskSheet = ensureSlidesTaskSheet_(spreadsheet, config);
+  Logger.log('Slides tasks go in "' + slidesTaskSheet.getName() + '", and their answers in "' + slidesSheet.getName() + '".');
   var folder = ensureScreenshotsFolder_(config);
   Logger.log('Screenshots are saved to the Drive folder "' + folder.getName() + '": ' + folder.getUrl());
-  logCodeChanges_(fillMissingCodes_(taskSheet, config));
+  logCodeChanges_(fillMissingCodes_(spreadsheet, config));
 }
 
 /**
- * Run from the Apps Script editor after adding tasks to the Tasks tab. Every
- * task row with an empty Code cell gets a new random code that no other task
- * uses. Existing codes are never changed.
+ * Run from the Apps Script editor after adding tasks to the Tasks or Slides
+ * Tasks tab. Every task row with an empty Code cell gets a new random code
+ * that no other task in either tab uses. Existing codes are never changed.
  */
 function generateTaskCodes() {
   var config = getConfig_();
-  var sheet = getSpreadsheet_(config).getSheetByName(config.taskSheetName);
-  if (!sheet) throw new Error('There is no "' + config.taskSheetName + '" tab. Run setupSheet first.');
-  logCodeChanges_(fillMissingCodes_(sheet, config));
+  var spreadsheet = getSpreadsheet_(config);
+  if (!spreadsheet.getSheetByName(config.taskSheetName) && !spreadsheet.getSheetByName(config.slidesTaskSheetName)) {
+    throw new Error(
+      'There is no "' + config.taskSheetName + '" or "' + config.slidesTaskSheetName + '" tab. Run setupSheet first.'
+    );
+  }
+  logCodeChanges_(fillMissingCodes_(spreadsheet, config));
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +240,8 @@ function getConfig_() {
     spreadsheetId: (props.getProperty('SPREADSHEET_ID') || '').trim() || DEFAULT_SPREADSHEET_ID,
     sheetName: (props.getProperty('SHEET_NAME') || '').trim() || DEFAULT_SHEET_NAME,
     taskSheetName: (props.getProperty('TASK_SHEET_NAME') || '').trim() || DEFAULT_TASK_SHEET_NAME,
+    slidesSheetName: (props.getProperty('SLIDES_SHEET_NAME') || '').trim() || DEFAULT_SLIDES_SHEET_NAME,
+    slidesTaskSheetName: (props.getProperty('SLIDES_TASK_SHEET_NAME') || '').trim() || DEFAULT_SLIDES_TASK_SHEET_NAME,
     screenshotsFolderId: (props.getProperty('SCREENSHOTS_FOLDER_ID') || '').trim(),
     allowedOrigins: origins,
   };
@@ -206,15 +265,38 @@ function getSpreadsheet_(config) {
   return spreadsheet;
 }
 
-function getSheet_(config) {
+/** The responses tab, or the tab with the given name; created if missing. */
+function getSheet_(config, name) {
   var spreadsheet = getSpreadsheet_(config);
-  return spreadsheet.getSheetByName(config.sheetName) || spreadsheet.insertSheet(config.sheetName);
+  var sheetName = name || config.sheetName;
+  return spreadsheet.getSheetByName(sheetName) || spreadsheet.insertSheet(sheetName);
 }
 
-// The Tasks tab has a header row with "Code", "Title" and "Task" columns (in
-// any order; other columns are ignored) and one task per row below it. A row
-// with an empty Code cell is never shown to anyone.
-var TASK_HEADERS = { code: 'Code', title: 'Title', text: 'Task' };
+// Each task tab has a header row (columns in any order; other columns are
+// ignored) and one task per row below it. A row with an empty Code cell is
+// never shown to anyone. `content` lists the cells that make a row a task
+// that needs a code.
+var TASK_TABLE = {
+  headers: { code: 'Code', title: 'Title', text: 'Task' },
+  required: ['code', 'text'],
+  content: ['title', 'text'],
+};
+var TASK_HEADERS = TASK_TABLE.headers;
+// Slides tasks: the user request, the input files (one per line), and a
+// Google Drive link to each presentation. Response C is optional.
+var SLIDES_TASK_TABLE = {
+  headers: {
+    code: 'Code',
+    title: 'Title',
+    request: 'User request',
+    inputFiles: 'Input files',
+    A: 'Response A',
+    B: 'Response B',
+    C: 'Response C',
+  },
+  required: ['code', 'request', 'A', 'B'],
+  content: ['title', 'request', 'A'],
+};
 // No 0/O, 1/I/L, so codes are easy to read out and type.
 var CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 var CODE_LENGTH = 8;
@@ -256,54 +338,168 @@ function readLegacyTask_(spreadsheet, config) {
   return task.title || task.text ? task : null;
 }
 
-/** Column indexes (0-based) of the task headers in row 1; title is -1 if absent. */
-function taskColumns_(headerRow, config) {
-  function find(name) {
-    for (var c = 0; c < headerRow.length; c++) {
-      if (String(headerRow[c]).trim().toLowerCase() === name.toLowerCase()) return c;
-    }
-    return -1;
-  }
-  var cols = { code: find(TASK_HEADERS.code), title: find(TASK_HEADERS.title), text: find(TASK_HEADERS.text) };
-  if (cols.code === -1 || cols.text === -1) {
+function ensureSlidesTaskSheet_(spreadsheet, config) {
+  var sheet = spreadsheet.getSheetByName(config.slidesTaskSheetName);
+  if (sheet) return sheet;
+  var h = SLIDES_TASK_TABLE.headers;
+  var headers = [h.code, h.title, h.request, h.inputFiles, h.A, h.B, h.C];
+  sheet = spreadsheet.insertSheet(config.slidesTaskSheetName);
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  return sheet;
+}
+
+/** Column indexes (0-based) of the table's headers in row 1; -1 for an optional header that is absent. */
+function taskColumns_(headerRow, spec, tabName) {
+  var names = headerRow.map(function (h) { return String(h).trim().toLowerCase(); });
+  var cols = {};
+  Object.keys(spec.headers).forEach(function (key) {
+    cols[key] = names.indexOf(spec.headers[key].toLowerCase());
+  });
+  var missing = spec.required.some(function (key) { return cols[key] === -1; });
+  if (missing) {
+    var required = spec.required.map(function (key) { return '"' + spec.headers[key] + '"'; });
     throw new ApiError_(
       'CONFIG_ERROR',
-      'Row 1 of the "' + config.taskSheetName + '" tab must have "Code" and "Task" column headers.'
+      'Row 1 of the "' + tabName + '" tab must have ' + required.slice(0, -1).join(', ') + ' and ' +
+        required[required.length - 1] + ' column headers.'
     );
   }
   return cols;
 }
 
-/** Reads the Tasks tab as { cols, rows } with display values, or null if it is missing or empty. */
-function readTaskTable_(sheet, config) {
+/** Reads a task tab as { cols, rows } with display values, or null if it is missing or empty. */
+function readTaskTable_(sheet, spec) {
   if (!sheet || sheet.getLastRow() === 0) return null;
   // Display values return exactly what the cell shows, so dates and numbers
   // in the task text are not reformatted.
   var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getDisplayValues();
-  return { cols: taskColumns_(values[0], config), rows: values.slice(1) };
+  return { cols: taskColumns_(values[0], spec, sheet.getName()), rows: values.slice(1) };
+}
+
+/** The trimmed text of a row's cell, or '' when the table has no such column. */
+function cellText_(table, row, key) {
+  var c = table.cols[key];
+  return c === -1 || c === undefined ? '' : String(row[c]).trim();
+}
+
+/** Both task tabs that exist and are not empty, as [{ type, name, spec, sheet, table }]. */
+function taskTabs_(spreadsheet, config) {
+  return [
+    { type: 'connector', name: config.taskSheetName, spec: TASK_TABLE },
+    { type: 'slides', name: config.slidesTaskSheetName, spec: SLIDES_TASK_TABLE },
+  ]
+    .map(function (tab) {
+      tab.sheet = spreadsheet.getSheetByName(tab.name);
+      tab.table = readTaskTable_(tab.sheet, tab.spec);
+      return tab;
+    })
+    .filter(function (tab) { return tab.table; });
 }
 
 /**
- * Returns { code, title, text } for the task whose code matches, or null.
+ * Returns the task whose code matches, from either task tab, or null:
+ * { code, title, text } for a connector task, or
+ * { code, type: 'slides', title, request, inputFiles, responses } for a slides task.
  * A code shared by several rows matches none of them, so a copy-paste mistake
  * in the sheet never shows one candidate the wrong task.
  */
 function findTask_(spreadsheet, config, code) {
   var wanted = normalizeCode_(code);
   if (!wanted) return null;
-  var table = readTaskTable_(spreadsheet.getSheetByName(config.taskSheetName), config);
-  if (!table) return null;
-  var cols = table.cols;
-  var matches = table.rows.filter(function (row) { return normalizeCode_(row[cols.code]) === wanted; });
+  var matches = [];
+  taskTabs_(spreadsheet, config).forEach(function (tab) {
+    tab.table.rows.forEach(function (row) {
+      if (normalizeCode_(cellText_(tab.table, row, 'code')) === wanted) matches.push({ tab: tab, row: row });
+    });
+  });
   if (matches.length > 1) {
     throw new ApiError_('CONFIG_ERROR', 'This code is assigned to more than one task. Ask the person who gave it to you.');
   }
   if (matches.length === 0) return null;
+  var table = matches[0].tab.table;
+  var row = matches[0].row;
+  if (matches[0].tab.type === 'slides') return slidesTask_(wanted, table, row);
+  return { code: wanted, title: cellText_(table, row, 'title'), text: cellText_(table, row, 'text') };
+}
+
+function slidesTask_(code, table, row) {
+  if (!cellText_(table, row, 'A') || !cellText_(table, row, 'B')) {
+    throw new ApiError_(
+      'CONFIG_ERROR',
+      'This task needs a presentation link in both Response A and Response B. Ask the person who gave you the code.'
+    );
+  }
+  var responses = [];
+  SLIDES_RESPONSE_LABELS.forEach(function (label) {
+    var link = cellText_(table, row, label);
+    if (!link) return;
+    var fileId = driveFileId_(link);
+    if (!fileId) {
+      throw new ApiError_(
+        'CONFIG_ERROR',
+        'Response ' + label + ' of this task is not a Google Drive file link. Ask the person who gave you the code.'
+      );
+    }
+    responses.push({ label: label, fileId: fileId });
+  });
   return {
-    code: wanted,
-    title: cols.title === -1 ? '' : String(matches[0][cols.title]).trim(),
-    text: String(matches[0][cols.text]).trim(),
+    code: code,
+    type: 'slides',
+    title: cellText_(table, row, 'title'),
+    request: cellText_(table, row, 'request'),
+    inputFiles: parseInputFiles_(cellText_(table, row, 'inputFiles')),
+    responses: responses,
   };
+}
+
+/**
+ * The file ID in a Google Drive link such as
+ * https://drive.google.com/file/d/<id>/view or https://docs.google.com/presentation/d/<id>/edit,
+ * or a bare ID. Returns '' for anything else, including folder links.
+ */
+function driveFileId_(value) {
+  var text = String(value).trim();
+  var match =
+    /\/d\/([A-Za-z0-9_-]{10,})/.exec(text) ||
+    /[?&]id=([A-Za-z0-9_-]{10,})/.exec(text) ||
+    /^([A-Za-z0-9_-]{20,})$/.exec(text);
+  return match ? match[1] : '';
+}
+
+/**
+ * The "Input files" cell has one file per line: a name, a link, or
+ * "name | link". For a bare Google Drive link the name is looked up in Drive.
+ * Returns [{ name, url }], where url is '' when there is no http(s) link.
+ */
+function parseInputFiles_(cell) {
+  return cell
+    .split('\n')
+    .map(function (line) { return line.trim(); })
+    .filter(function (line) { return line; })
+    .map(function (line) {
+      var bar = line.lastIndexOf('|');
+      if (bar !== -1) {
+        var url = webUrl_(line.slice(bar + 1).trim());
+        return { name: line.slice(0, bar).trim() || url, url: url };
+      }
+      if (!webUrl_(line)) return { name: line, url: '' };
+      return { name: driveFileName_(line) || line, url: line };
+    });
+}
+
+function webUrl_(value) {
+  return /^https?:\/\/\S+$/i.test(value) ? value : '';
+}
+
+function driveFileName_(url) {
+  var id = driveFileId_(url);
+  if (!id) return '';
+  try {
+    return DriveApp.getFileById(id).getName();
+  } catch (err) {
+    return '';
+  }
 }
 
 function newCode_(used) {
@@ -319,42 +515,45 @@ function newCode_(used) {
 }
 
 /**
- * Gives every task row that has a title or task text but no code a new unique
- * code. Returns { added: [{ row, code }], duplicates: [code] }.
+ * Gives every task row, in both task tabs, that has content but no code a new
+ * code that no other task uses. Returns
+ * { added: [{ tab, row, code }], duplicates: [code] }.
  */
-function fillMissingCodes_(sheet, config) {
+function fillMissingCodes_(spreadsheet, config) {
   var result = { added: [], duplicates: [] };
-  var table = readTaskTable_(sheet, config);
-  if (!table) return result;
-  var cols = table.cols;
+  var tabs = taskTabs_(spreadsheet, config);
   var used = {};
-  table.rows.forEach(function (row) {
-    var code = normalizeCode_(row[cols.code]);
-    if (!code) return;
-    if (used[code] && result.duplicates.indexOf(code) === -1) result.duplicates.push(code);
-    used[code] = true;
+  tabs.forEach(function (tab) {
+    tab.table.rows.forEach(function (row) {
+      var code = normalizeCode_(cellText_(tab.table, row, 'code'));
+      if (!code) return;
+      if (used[code] && result.duplicates.indexOf(code) === -1) result.duplicates.push(code);
+      used[code] = true;
+    });
   });
-  table.rows.forEach(function (row, i) {
-    var hasTask = String(row[cols.text]).trim() || (cols.title !== -1 && String(row[cols.title]).trim());
-    if (normalizeCode_(row[cols.code]) || !hasTask) return;
-    var code = newCode_(used);
-    // Written as literal text so a code such as "23E45678" is not read as a number.
-    sheet.getRange(i + 2, cols.code + 1).setValues([[toCellValue_(code)]]);
-    result.added.push({ row: i + 2, code: code });
+  tabs.forEach(function (tab) {
+    tab.table.rows.forEach(function (row, i) {
+      var hasTask = tab.spec.content.some(function (key) { return cellText_(tab.table, row, key); });
+      if (normalizeCode_(cellText_(tab.table, row, 'code')) || !hasTask) return;
+      var code = newCode_(used);
+      // Written as literal text so a code such as "23E45678" is not read as a number.
+      tab.sheet.getRange(i + 2, tab.table.cols.code + 1).setValues([[toCellValue_(code)]]);
+      result.added.push({ tab: tab.name, row: i + 2, code: code });
+    });
   });
   return result;
 }
 
 function logCodeChanges_(result) {
-  result.added.forEach(function (a) { Logger.log('Row ' + a.row + ': new code ' + a.code); });
+  result.added.forEach(function (a) { Logger.log('"' + a.tab + '" row ' + a.row + ': new code ' + a.code); });
   if (result.added.length === 0) Logger.log('Every task already has a code.');
   result.duplicates.forEach(function (code) {
     Logger.log('Warning: code ' + code + ' is used by more than one row. Nobody can open those tasks until each has its own code.');
   });
 }
 
-function ensureHeader_(sheet) {
-  var headers = COLUMNS.map(function (c) { return c[1]; });
+function ensureHeader_(sheet, columns) {
+  var headers = (columns || COLUMNS).map(function (c) { return c[1]; });
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
     sheet.setFrozenRows(1);
@@ -422,18 +621,7 @@ function validateSubmission_(body) {
     }
   }
 
-  if (typeof body.submissionId !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(body.submissionId)) {
-    errors.submissionId = 'Submission ID is missing or invalid.';
-  } else {
-    record.submissionId = body.submissionId;
-  }
-
-  var taskCode = body.taskCode;
-  if (typeof taskCode !== 'string' || taskCode.length > MAX_SHORT_TEXT_LENGTH || !normalizeCode_(taskCode)) {
-    errors.taskCode = 'Task code is missing. Reload the page and enter your task code.';
-  } else {
-    record.taskCode = taskCode;
-  }
+  validateIdentity_(body, errors, record);
 
   if (typeof body.dateOfTest !== 'string' || !isValidDate_(body.dateOfTest)) {
     errors.dateOfTest = 'Date of Test must be a valid date (YYYY-MM-DD).';
@@ -488,6 +676,96 @@ function validateSubmission_(body) {
   return record;
 }
 
+/** Checks the submission ID and task code that every kind of submission carries. */
+function validateIdentity_(body, errors, record) {
+  if (typeof body.submissionId !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(body.submissionId)) {
+    errors.submissionId = 'Submission ID is missing or invalid.';
+  } else {
+    record.submissionId = body.submissionId;
+  }
+
+  var taskCode = body.taskCode;
+  if (typeof taskCode !== 'string' || taskCode.length > MAX_SHORT_TEXT_LENGTH || !normalizeCode_(taskCode)) {
+    errors.taskCode = 'Task code is missing. Reload the page and enter your task code.';
+  } else {
+    record.taskCode = taskCode;
+  }
+}
+
+/**
+ * Saves a slides evaluation:
+ * { kind: 'slides', submissionId, taskCode,
+ *   ratings: { A: { contentQuality: 1-7, contentQualityExplanation: '...', ... }, B: ... },
+ *   ranking: ['B', 'A', 'C'], rankingReason }
+ * Every response in the task must be rated on every axis and ranked once.
+ */
+function saveSlidesSubmission_(config, body) {
+  var errors = {};
+  var identity = {};
+  validateIdentity_(body, errors, identity);
+  if (Object.keys(errors).length > 0) throw new ApiError_('VALIDATION_ERROR', 'Some fields are missing or invalid.', errors);
+
+  var task = findTask_(getSpreadsheet_(config), config, identity.taskCode);
+  if (!task || task.type !== 'slides') throw invalidSubmissionCode_();
+  var record = validateSlidesSubmission_(body, task);
+  record.submissionId = identity.submissionId;
+  return saveRecord_(config, record, { sheet: getSheet_(config, config.slidesSheetName), columns: SLIDES_COLUMNS });
+}
+
+function validateSlidesSubmission_(body, task) {
+  var errors = {};
+  var record = { taskCode: task.code, taskTitle: task.title, screenshotFiles: [] };
+  var labels = task.responses.map(function (r) { return r.label; });
+  var ratings = body.ratings && typeof body.ratings === 'object' ? body.ratings : {};
+
+  labels.forEach(function (label) {
+    var given = ratings[label] && typeof ratings[label] === 'object' ? ratings[label] : {};
+    SLIDES_AXES.forEach(function (axis) {
+      var key = label + '_' + axis[0];
+      var name = 'Response ' + label + ' ' + axis[1];
+      var score = given[axis[0]];
+      if (typeof score !== 'number' || score % 1 !== 0 || score < 1 || score > SLIDES_RATING_MAX) {
+        errors[key] = name + ' must be a whole number from 1 to ' + SLIDES_RATING_MAX + '.';
+      } else {
+        record[key] = score;
+      }
+      var explanation = given[axis[0] + 'Explanation'];
+      if (typeof explanation !== 'string' || explanation.trim() === '') {
+        errors[key + 'Explanation'] = name + ' needs an explanation.';
+      } else if (explanation.length > MAX_TEXT_LENGTH) {
+        errors[key + 'Explanation'] = name + ' explanation must be at most ' + MAX_TEXT_LENGTH + ' characters.';
+      } else {
+        record[key + 'Explanation'] = explanation;
+      }
+    });
+  });
+
+  var ranking = body.ranking;
+  var rankingValid =
+    Array.isArray(ranking) &&
+    ranking.length === labels.length &&
+    labels.every(function (label) { return ranking.indexOf(label) !== -1; });
+  if (!rankingValid) {
+    errors.ranking = 'The ranking must place each response (' + labels.join(', ') + ') exactly once.';
+  } else {
+    ranking.forEach(function (label, i) { record['rank' + (i + 1)] = 'Response ' + label; });
+  }
+
+  var reason = body.rankingReason;
+  if (typeof reason !== 'string' || reason.trim() === '') {
+    errors.rankingReason = 'What drove the ranking is required.';
+  } else if (reason.length > MAX_TEXT_LENGTH) {
+    errors.rankingReason = 'What drove the ranking must be at most ' + MAX_TEXT_LENGTH + ' characters.';
+  } else {
+    record.rankingReason = reason;
+  }
+
+  if (Object.keys(errors).length > 0) {
+    throw new ApiError_('VALIDATION_ERROR', 'Some fields are missing or invalid.', errors);
+  }
+  return record;
+}
+
 function isValidDate_(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   var parts = value.split('-').map(Number);
@@ -515,9 +793,14 @@ function findSubmissionRow_(sheet, submissionId) {
   return null;
 }
 
-function saveRecord_(config, record) {
-  var sheet = getSheet_(config);
-  ensureHeader_(sheet);
+/**
+ * Appends the record as one row. `target` is { sheet, columns }; by default the
+ * responses tab with COLUMNS. Columns the record has no value for stay empty.
+ */
+function saveRecord_(config, record, target) {
+  var sheet = target ? target.sheet : getSheet_(config);
+  var columns = target ? target.columns : COLUMNS;
+  ensureHeader_(sheet, columns);
 
   // A retry of a request that already succeeded (e.g. the response was lost)
   // must not create a second row. Checked before the screenshots are saved so
@@ -536,7 +819,7 @@ function saveRecord_(config, record) {
       throw new ApiError_('BUSY', 'The server is busy. Try again in a moment.');
     }
     try {
-      ensureHeader_(sheet);
+      ensureHeader_(sheet, columns);
       existing = findSubmissionRow_(sheet, record.submissionId);
       if (existing) {
         if (folder) folder.setTrashed(true);
@@ -544,7 +827,7 @@ function saveRecord_(config, record) {
       }
 
       record.submittedAt = new Date().toISOString();
-      var row = COLUMNS.map(function (c) { return toCellValue_(record[c[0]]); });
+      var row = columns.map(function (c) { return toCellValue_(record[c[0]] === undefined ? '' : record[c[0]]); });
       var rowNumber = sheet.getLastRow() + 1;
       sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
       SpreadsheetApp.flush();

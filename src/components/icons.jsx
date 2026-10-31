@@ -82,6 +82,26 @@ export function XIcon(props) {
   )
 }
 
+export function HomeIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5 9v11h5v-6h4v6h5V9" />
+    </Icon>
+  )
+}
+
+export function ExpandIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M15 3h6v6" />
+      <path d="M9 21H3v-6" />
+      <path d="m21 3-7 7" />
+      <path d="m3 21 7-7" />
+    </Icon>
+  )
+}
+
 export function SpinnerIcon({ className = 'size-4', ...props }) {
   return (
     <Icon className={`${className} animate-spin`} {...props}>

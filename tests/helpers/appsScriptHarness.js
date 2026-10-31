@@ -138,7 +138,8 @@ export function createAppsScriptEnv({ properties = {}, spreadsheets = {}, active
   const logs = []
   let lockHeld = false
   let lockAvailable = true
-  const drive = { folders: new Map(), failCreateFile: false }
+  // `files` maps a Drive file ID to its name, for looking up input file names.
+  const drive = { folders: new Map(), files: new Map(), failCreateFile: false }
 
   const context = {
     console: { error: (...args) => logs.push(args), log: (...args) => logs.push(args) },
@@ -163,6 +164,10 @@ export function createAppsScriptEnv({ properties = {}, spreadsheets = {}, active
         return drive.folders.get(id)
       },
       createFolder: (name) => new FakeFolder(drive, name),
+      getFileById(id) {
+        if (!drive.files.has(id)) throw new Error(`File not found: ${id}`)
+        return { getName: () => drive.files.get(id) }
+      },
     },
     Utilities: {
       // Like Apps Script, returns signed bytes and throws on invalid input.

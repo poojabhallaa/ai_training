@@ -59,5 +59,15 @@ export async function fetchTask(taskCode, options = {}) {
       'The server did not confirm the code. The Apps Script deployment may need to be updated to the latest version.',
     )
   }
+  if (task.type === 'slides') {
+    return {
+      code: task.code,
+      type: 'slides',
+      title: task.title || '',
+      request: task.request || '',
+      inputFiles: Array.isArray(task.inputFiles) ? task.inputFiles : [],
+      responses: Array.isArray(task.responses) ? task.responses : [],
+    }
+  }
   return { code: task.code, title: task.title || '', text: task.text || '' }
 }

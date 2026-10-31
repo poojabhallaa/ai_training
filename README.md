@@ -9,6 +9,7 @@ A single-page form for evaluating candidates on AI connector tasks, such as anal
 ## Features
 
 - Task codes: the page first asks for a task code. Each task in the "Tasks" tab of the Google Sheet has its own code, and only a matching code opens that task and the evaluation form. See [Tasks and task codes](#tasks-and-task-codes).
+- Slides evaluation tasks: a second kind of task where the evaluator views two or three presentations from Google Drive side by side, rates each on six axes from 1 to 7 with an explanation for each rating, and ranks them. See [Slides evaluation tasks](#slides-evaluation-tasks).
 - Six sections: Basic Information, Prompt and Expected Result, Evaluation of Outcome, Actual Result and Additional Notes, Screenshots, and Submission
 - Optional screenshots: up to 10 images per submission (PNG, JPEG, or WebP), added with the file picker, drag and drop, or paste. They are saved to Google Drive, and the row links to them. See [Screenshots](#screenshots).
 - Inline validation on blur and on submit, with errors shown next to each field and focus moved to the first invalid field
@@ -47,6 +48,8 @@ scripts/mock-apps-script.mjs  Local stand-in for the Apps Script endpoint
 | Apps Script, Script Properties | `SPREADSHEET_ID` | No | Overrides `DEFAULT_SPREADSHEET_ID` in `Code.gs`. The ID is the part of the sheet URL between `/d/` and `/edit`. |
 | Apps Script, Script Properties | `SHEET_NAME` | No | Overrides the responses tab name, `DEFAULT_SHEET_NAME` (`AI training responses`). The tab is created if missing. |
 | Apps Script, Script Properties | `TASK_SHEET_NAME` | No | Overrides the task tab name, `DEFAULT_TASK_SHEET_NAME` (`Tasks`). |
+| Apps Script, Script Properties | `SLIDES_TASK_SHEET_NAME` | No | Overrides the slides task tab name (`Slides Tasks`). |
+| Apps Script, Script Properties | `SLIDES_SHEET_NAME` | No | Overrides the slides responses tab name (`Slides eval responses`). |
 | Apps Script, Script Properties | `SCREENSHOTS_FOLDER_ID` | No | Drive folder that receives screenshots. `setupSheet` creates a **Candidate Evaluation Screenshots** folder and sets this for you. Set it yourself to use an existing folder. |
 | Apps Script, Script Properties | `ALLOWED_ORIGINS` | No | Comma-separated site origins allowed to submit, e.g. `https://you.github.io,http://localhost:5173`. See [Security considerations](#security-considerations). |
 
@@ -107,6 +110,28 @@ Tasks live in the **Tasks** tab of the same spreadsheet, one per row, so you nev
 - After a correct code, it is remembered for that browser tab, so a refresh does not ask again. **Use a different code** in the task box switches tasks.
 - To use a different tab name, set `TASK_SHEET_NAME`.
 
+## Slides evaluation tasks
+
+A slides task opens a different page from the same code screen: the instructions (the same for every slides task, in [`src/config/slidesEval.js`](src/config/slidesEval.js)), the user request, the input files, then Response A, B and (optionally) C side by side. Each response shows its presentation in Google Drive's viewer, followed by **Individual Rating**: Content quality, Storytelling, Writing style, Aesthetics, Layout and Overall, each rated 1 to 7 with a required explanation. **Overall Ranking** asks for Rank 1 to 3 (one rank per response; picking a response for a rank removes it from any other rank) and what drove the ranking. On a phone, the Response buttons switch between responses; on a wide screen they scroll to that response.
+
+Slides tasks live in the **Slides Tasks** tab, which `setupSheet` creates with its header row. One task per row:
+
+| Column | What to put there |
+| --- | --- |
+| Code | Leave empty and run `generateTaskCodes`, or type your own. Codes are unique across both task tabs. |
+| Title | Optional. Shown at the top of the page; "Slides Evaluation" when empty. |
+| User request | The request the presentations were made for. Line breaks are kept. |
+| Input files | Optional. One file per line: a name (`image.webp`), a link, or `name \| link`. For a bare Google Drive file link, the file's name is looked up in Drive. |
+| Response A, Response B | Required. A Google Drive link to each presentation, such as the **Copy link** of a .pptx file. |
+| Response C | Optional. Leave empty for a task with two responses. |
+
+- **Share every presentation as "Anyone with the link can view"** (in Drive: **Share > General access**). Otherwise the evaluator sees a Google sign-in box instead of the slides. Sharing the folder that holds them works too, for files added to it later.
+- Paste links to files, not to the folder. A folder link is reported as "not a Google Drive file link".
+- Name the files neutrally (for example `deck-1.pptx`), since the instructions ask evaluators to treat filenames as neutral and the full-screen viewer can show the file name.
+- The expand button next to **Rendered preview** opens a response in a large viewer.
+- Answers go to the **Slides eval responses** tab, one row per evaluation: Submission ID, timestamp, task code and title, then for each of Response A, B and C a rating and an explanation column per axis, then Rank 1 to 3 (as `Response B`, and so on) and Ranking Reason. A task with two responses leaves the Response C columns and Rank 3 empty.
+- The axis wording is in [`src/config/slidesEval.js`](src/config/slidesEval.js). Changing the text only needs a rebuild of the site. Adding or removing an axis also needs `SLIDES_AXES` in `Code.gs` updated and a new version deployed.
+
 ## Screenshots
 
 The **Screenshots** section is optional. A candidate can add up to 10 images per submission with **Add screenshots**, by dragging files onto the box, or by clicking the box and pasting (Cmd+V or Ctrl+V).
@@ -137,7 +162,7 @@ npm run mock:backend
 VITE_APPS_SCRIPT_URL=http://localhost:8787/exec npm run dev
 ```
 
-- `http://localhost:8787/rows` shows the stored rows. The mock has two sample tasks, with the codes `FBADS001` and `SHOPIFY2`.
+- `http://localhost:8787/rows` shows the stored rows, and `http://localhost:8787/rows?tab=slides` the slides evaluations. The mock has two sample tasks, with the codes `FBADS001` and `SHOPIFY2`, and two slides tasks, `SLIDES03` (three responses) and `SLIDES02` (two). Their Drive links are placeholders, so the previews show Drive's "file does not exist" page.
 - `http://localhost:8787/mode?fail=1` simulates server errors, `http://localhost:8787/mode?delay=3000` simulates slow responses, and `http://localhost:8787/mode` restores normal behavior.
 
 ## 4. Build and deploy the frontend
@@ -209,6 +234,9 @@ The values for Task Success, Which Is Better, and State Change Validated are als
 | "The screenshots could not be saved to Google Drive" | The deploying account is out of Drive storage, or Drive had a temporary problem. Check **Executions** in the Apps Script editor. |
 | "The screenshots folder could not be opened" | `SCREENSHOTS_FOLDER_ID` points to a folder that was deleted or that the deploying account cannot edit. Delete the property and run `setupSheet` to create a new folder. |
 | Screenshot uploads fail right after updating the script | The new Drive permission has not been granted yet. Run `setupSheet` once in the editor, accept the permissions, and deploy a **New version**. |
+| A slides preview shows a Google sign-in box or "You need access" | The presentation is not shared as **Anyone with the link can view**. |
+| A slides preview says the file does not exist | The link in the Slides Tasks tab is wrong, or the file was deleted or moved to the trash. |
+| "This task needs a presentation link in both Response A and Response B" | Fill in both columns for that row in the Slides Tasks tab. |
 | Changes to `Code.gs` have no effect | You need to deploy a **New version** of the existing deployment. |
 | Executions fail with no clear error | Check **Executions** in the Apps Script editor for logs. |
 
@@ -224,4 +252,6 @@ npm test
 - `tests/appsScript.test.js`: runs `Code.gs` and checks for exactly one row per submission, column order, multiline and special characters, formula escaping, duplicate IDs, malformed and invalid requests, configuration errors, lock contention, `ALLOWED_ORIGINS`, task codes (lookup, normalization, duplicates, submissions without a valid code), adding the task columns to an older responses tab, screenshots (Drive folders, limits, type checks, cleanup on failure, retries), `setupSheet`, and `generateTaskCodes`
 - `tests/TaskBox.test.jsx`: task box content and headings, and the task request
 - `tests/App.test.jsx`: the code screen, wrong codes, remembering and re-checking a code, and switching codes
+- `tests/slidesAppsScript.test.js`: slides task lookup, Drive link and input file parsing, configuration errors, slides submissions (column order, two-response tasks, validation, wrong task type, retries, formula escaping), and the slides tabs in `setupSheet` and `generateTaskCodes`
+- `tests/SlidesEvaluation.test.jsx`: the slides page content and exact axis wording, two- and three-response tasks, ranking, validation, submission, failures and retries, the full-screen viewer, and opening a slides task from the code screen
 - `tests/screenshots.test.js`: keeping small images, resizing large ones, and rejecting unsupported or broken files
